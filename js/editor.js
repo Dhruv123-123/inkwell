@@ -263,10 +263,12 @@ export class Editor {
       pe.textLayer.style.width = pe.page.w + 'px';
       pe.textLayer.style.height = pe.page.h + 'px';
       pe.textLayer.style.transform = `scale(${s})`;
+      this.dropDetail(pe);
       if (pe.mounted) this.renderPageEl(pe);
     }
     if (this.sel) this.showSelection();
     this.updatePageNum();
+    this.scheduleDetail();
   }
 
   mount(pe) {
@@ -278,6 +280,7 @@ export class Editor {
   unmount(pe) {
     if (!pe.mounted || pe === this.active?.pe) return;
     pe.mounted = false;
+    this.dropDetail(pe);
     pe.canvas.width = pe.canvas.height = 0;
     pe.textLayer.innerHTML = '';
   }
@@ -304,6 +307,7 @@ export class Editor {
     const opts = { skipText: true, alphaFor: this.audio?.alphaFor() };
     for (const it of p.items) drawItem(ctx, it, images, opts);
     pe.images = images;
+    this.paintDetail(pe);
     this.renderTextLayer(pe);
   }
 
@@ -314,6 +318,7 @@ export class Editor {
     const ctx = pe.canvas.getContext('2d');
     ctx.setTransform(ps, 0, 0, ps, 0, 0);
     drawItem(ctx, item, pe.images || new Map(), { skipText: true });
+    this.paintDetail(pe, item);
   }
 
   renderTextLayer(pe) {
@@ -364,8 +369,9 @@ export class Editor {
 
   applyTouchAction() {
     if (!this.scroller) return;
-    const fingerDraws = !this.pencilOnly && DRAW_TOOLS.has(this.tool) && this.tool !== 'text';
-    this.scroller.style.touchAction = fingerDraws ? 'none' : 'pan-x pan-y';
+    // The page handles every gesture itself (see onTouch*): with native panning
+    // enabled, iOS delays Pencil events while it decides whether a touch is a scroll.
+    this.scroller.style.touchAction = 'none';
   }
 
   persistTools() {
@@ -535,7 +541,7 @@ export class Editor {
     closePopover();
     try { this.scroller.setPointerCapture(e.pointerId); } catch {}
     const pt = this.pagePoint(e, pe);
-    this.active = { id: e.pointerId, type: e.pointerType, pe, start: pt, last: pt, moved: false, t0: performance.now(), raw: [[pt[0], pt[1], e.timeStamp]] };
+    this.active = { id: e.pointerId, type: e.pointerType, pe, start: pt, last: pt, moved: false, t0: performance.now() };
     const h = this['down_' + this.tool];
     if (h) h.call(this, this.active, pt, e);
   }
@@ -551,29 +557,9 @@ export class Editor {
       if (!a.moved && Math.hypot(pt[0] - a.start[0], pt[1] - a.start[1]) * this.scale > 4) a.moved = true;
       if (h) h.call(this, a, pt, ev);
       a.last = pt;
-      a.raw.push([pt[0], pt[1], ev.timeStamp]);
-      if (a.raw.length > 6) a.raw.shift();
     }
     if (a.type === 'pen') this.lastPenT = performance.now();
-    if (a.item) a.pred = this.predict(a, e);
     if (h) this.requestLive();
-  }
-
-  // Where the Pencil will be about one frame from now, so live ink keeps up with the tip.
-  predict(a, e) {
-    const ev = e.getPredictedEvents ? e.getPredictedEvents() : [];
-    if (ev.length) { const p = this.pagePoint(ev[ev.length - 1], a.pe); return p; }
-    const r = a.raw;
-    if (r.length < 3) return null;
-    const [x1, y1, t1] = r[r.length - 1], [x0, y0, t0] = r[0];
-    const dt = t1 - t0;
-    if (dt <= 0 || dt > 80) return null;
-    const ahead = 14, max = 14 / this.scale;
-    let dx = (x1 - x0) / dt * ahead, dy = (y1 - y0) / dt * ahead;
-    const d = Math.hypot(dx, dy);
-    if (d < 0.3 / this.scale) return null;
-    if (d > max) { dx *= max / d; dy *= max / d; }
-    return [x1 + dx, y1 + dy];
   }
 
   onUp(e, cancelled = false) {
@@ -600,8 +586,46 @@ export class Editor {
 
   penBusy() { return this.active?.type === 'pen' || performance.now() - (this.lastPenT || 0) < 350; }
 
+  fingerPans() { return this.pencilOnly || this.tool === 'hand' || !DRAW_TOOLS.has(this.tool) || this.tool === 'text'; }
+
+  // One-finger panning with momentum, done by hand because touch-action is none.
+  startPan(t) {
+    this.stopMomentum();
+    this.pan = { id: t.identifier, x: t.clientX, y: t.clientY, t: performance.now(), vx: 0, vy: 0, moved: false };
+  }
+
+  movePan(e) {
+    const p = this.pan, t = [...e.touches].find(t => t.identifier === p.id);
+    if (!t) return;
+    const now = performance.now(), dt = Math.max(1, now - p.t);
+    const dx = t.clientX - p.x, dy = t.clientY - p.y;
+    if (!p.moved && Math.hypot(dx, dy) < 3) return;
+    p.moved = true;
+    this.scroller.scrollLeft -= dx; this.scroller.scrollTop -= dy;
+    p.vx = p.vx * 0.3 + (dx / dt) * 0.7; p.vy = p.vy * 0.3 + (dy / dt) * 0.7;
+    p.x = t.clientX; p.y = t.clientY; p.t = now;
+  }
+
+  endPan() {
+    const p = this.pan;
+    this.pan = null;
+    if (!p || !p.moved || performance.now() - p.t > 60) return;
+    let vx = p.vx, vy = p.vy, last = performance.now();
+    const step = now => {
+      const dt = Math.min(40, now - last); last = now;
+      const f = Math.pow(0.9955, dt);
+      vx *= f; vy *= f;
+      this.scroller.scrollLeft -= vx * dt; this.scroller.scrollTop -= vy * dt;
+      if (Math.hypot(vx, vy) > 0.02) this.momentum = requestAnimationFrame(step); else this.momentum = 0;
+    };
+    this.momentum = requestAnimationFrame(step);
+  }
+
+  stopMomentum() { if (this.momentum) { cancelAnimationFrame(this.momentum); this.momentum = 0; } }
+
   onTouchStart(e) {
     this.touchCount = e.touches.length;
+    this.stopMomentum();
     const touches = [...e.touches];
     const stylus = touches.some(t => t.touchType === 'stylus');
     // Palm rejection: while the Pencil is writing (or just lifted between letters),
@@ -613,12 +637,14 @@ export class Editor {
     }
     if (e.touches.length >= 2 && !stylus) {
       e.preventDefault();
+      this.pan = null;
       if (this.active && this.active.type === 'touch') this.cancelActive();
       if (e.touches.length === 2) this.startPinch(e);
       this.tapGesture = { n: e.touches.length, t: performance.now(), x: e.touches[0].clientX, y: e.touches[0].clientY, moved: false };
       return;
     }
-    if (stylus && this.tool !== 'hand' && this.tool !== 'text' && !e.target.closest('.tbox.editing')) e.preventDefault();
+    if (stylus && this.tool !== 'hand' && this.tool !== 'text' && !e.target.closest('.tbox.editing')) { e.preventDefault(); return; }
+    if (!stylus && e.touches.length === 1 && this.fingerPans() && !e.target.closest('.tbox.editing, .sel-bar, .audio-bar, .ed-tools')) this.startPan(e.touches[0]);
   }
 
   onTouchMove(e) {
@@ -626,10 +652,12 @@ export class Editor {
     const stylus = [...e.touches].some(t => t.touchType === 'stylus');
     if (stylus && this.tool !== 'hand') e.preventDefault();
     if (this.active) e.preventDefault();
+    if (this.pan && !stylus) { e.preventDefault(); this.movePan(e); }
   }
 
   onTouchEnd(e) {
     this.touchCount = e.touches.length;
+    if (this.pan && ![...e.touches].some(t => t.identifier === this.pan.id)) this.endPan();
     if (this.pinch && e.touches.length < 2) this.endPinch();
     const g = this.tapGesture;
     if (g && e.touches.length === 0) {
@@ -702,6 +730,7 @@ export class Editor {
   onScroll() {
     cancelAnimationFrame(this.scrollRaf);
     this.scrollRaf = requestAnimationFrame(() => this.updatePageNum());
+    this.scheduleDetail();
   }
 
   currentPageIndex() {
@@ -778,14 +807,62 @@ export class Editor {
     g.addEventListener('click', e => e.stopPropagation());
   }
 
+  // ---------- sharp zoom ----------
+  // Past the page canvas's pixel budget, the visible part of each page is painted
+  // again at screen resolution so ink stays crisp at any zoom.
+  scheduleDetail() {
+    clearTimeout(this.detailTimer);
+    this.detailTimer = setTimeout(() => this.renderDetails(), 120);
+  }
+
+  dropDetail(pe) { if (pe.detail) { pe.detail.remove(); pe.detail = null; } }
+
+  renderDetails() {
+    if (!this.scroller || !this.note) return;
+    const dpr = window.devicePixelRatio || 1, want = this.scale * dpr;
+    const wr = this.scroller.getBoundingClientRect();
+    for (const pe of this.pageEls.values()) {
+      const r = pe.el.getBoundingClientRect();
+      const x1 = Math.max(r.left, wr.left), y1 = Math.max(r.top, wr.top), x2 = Math.min(r.right, wr.right), y2 = Math.min(r.bottom, wr.bottom);
+      if (!pe.mounted || !pe.canvas.width || pe.canvas.width / pe.page.w >= want * 0.98 || x2 <= x1 || y2 <= y1) { this.dropDetail(pe); continue; }
+      const c = pe.detail || (pe.detail = el('canvas', { class: 'detail' }));
+      if (c.parentNode !== pe.el) pe.el.insertBefore(c, pe.textLayer);
+      const L = x1 - r.left, T = y1 - r.top, W = x2 - x1, H = y2 - y1;
+      Object.assign(c.style, { left: L + 'px', top: T + 'px', width: W + 'px', height: H + 'px' });
+      c.width = Math.round(W * dpr); c.height = Math.round(H * dpr);
+      pe.detailBox = [L, T, dpr];
+      this.paintDetail(pe);
+    }
+  }
+
+  paintDetail(pe, only) {
+    if (!pe.detail) return;
+    const ctx = pe.detail.getContext('2d'), [L, T, dpr] = pe.detailBox, k = this.scale * dpr;
+    ctx.setTransform(k, 0, 0, k, -L * dpr, -T * dpr);
+    const images = pe.images || new Map();
+    if (only) { drawItem(ctx, only, images, { skipText: true }); return; }
+    drawBackground(ctx, pe.page, this.note, images);
+    const opts = { skipText: true, alphaFor: this.audio?.alphaFor() };
+    for (const it of pe.page.items) drawItem(ctx, it, images, opts);
+  }
+
   // ---------- live overlay ----------
+  // The live layer is one screen-sized canvas over the scroller at full device
+  // resolution, mapped onto the page being written on and clipped to it.
   attachLive(pe) {
-    const ps = this.pxScale(pe.page);
-    const W = Math.round(pe.page.w * ps), H = Math.round(pe.page.h * ps);
+    const wrap = this.scrollWrap, dpr = window.devicePixelRatio || 1;
+    if (this.live.parentNode !== wrap) wrap.insertBefore(this.live, this.scroller.nextSibling);
+    const W = Math.round(wrap.clientWidth * dpr), H = Math.round(wrap.clientHeight * dpr);
     if (this.live.width !== W || this.live.height !== H) { this.live.width = W; this.live.height = H; }
-    if (this.live.parentNode !== pe.el) pe.el.append(this.live);
-    this.liveCtx.setTransform(ps, 0, 0, ps, 0, 0);
-    this.liveCtx.clearRect(0, 0, pe.page.w, pe.page.h);
+    const ctx = this.liveCtx;
+    if (this.liveClipped) ctx.restore();
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.clearRect(0, 0, W, H);
+    const wr = wrap.getBoundingClientRect(), pr = pe.el.getBoundingClientRect(), k = this.scale * dpr;
+    ctx.save();
+    ctx.setTransform(k, 0, 0, k, (pr.left - wr.left) * dpr, (pr.top - wr.top) * dpr);
+    ctx.beginPath(); ctx.rect(0, 0, pe.page.w, pe.page.h); ctx.clip();
+    this.liveClipped = true;
     this.livePe = pe;
   }
 
@@ -811,14 +888,17 @@ export class Editor {
     this.audio.tag(item);
     a.item = item;
     this.attachLive(a.pe);
+    // Only the stroke's own box is cleared and repainted each frame, so the GPU
+    // uploads a few thousand pixels instead of the whole screen.
+    let box = null;
     this.drawLive = () => {
-      this.clearLive();
-      if (a.shape) { drawShape(this.liveCtx, a.shape); return; }
-      const it = a.item;
-      if (a.pred && it.pts.length > 1 && !(tool === 'highlighter' && this.tools.highlighter.straight)) {
-        const last = it.pts[it.pts.length - 1];
-        drawStroke(this.liveCtx, { ...it, pts: it.pts.concat([[a.pred[0], a.pred[1], last[2]]]) });
-      } else drawStroke(this.liveCtx, it);
+      if (a.shape) { this.clearLive(); box = null; drawShape(this.liveCtx, a.shape); return; }
+      const it = a.item, pad = it.width * 2 + 2;
+      const nb = itemBBox(it);
+      box = box ? [Math.min(box[0], nb[0] - pad), Math.min(box[1], nb[1] - pad), Math.max(box[2], nb[2] + pad), Math.max(box[3], nb[3] + pad)]
+        : [nb[0] - pad, nb[1] - pad, nb[2] + pad, nb[3] + pad];
+      this.liveCtx.clearRect(box[0], box[1], box[2] - box[0], box[3] - box[1]);
+      drawStroke(this.liveCtx, it, true);
     };
     this.requestLive();
   }
@@ -830,10 +910,8 @@ export class Editor {
     if (a.shape) return;
     const pts = a.item.pts;
     const last = pts[pts.length - 1];
-    if (Math.hypot(pt[0] - last[0], pt[1] - last[1]) < 0.6 / this.scale) return;
-    // Light smoothing to take the edge off jitter.
-    const sx = last[0] * 0.25 + pt[0] * 0.75, sy = last[1] * 0.25 + pt[1] * 0.75;
-    pts.push([sx, sy, this.pressureOf(e)]);
+    if (Math.hypot(pt[0] - last[0], pt[1] - last[1]) < 0.25 / this.scale) return;
+    pts.push([pt[0], pt[1], this.pressureOf(e)]);
     if (this.shapeHold && this.tool === 'pen') {
       clearTimeout(a.holdTimer);
       a.holdTimer = setTimeout(() => this.snapShape(a), 650);

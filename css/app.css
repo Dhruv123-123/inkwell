@@ -478,3 +478,5 @@ mark { background: #ffe066; color: #000; border-radius: 2px; padding: 0 1px; }
 .ed-tools.vertical .icon-btn.tool, .ed-tools.vertical .icon-btn { height: 35px; }
 .ed-tools.vertical .swatches .swatch { margin: 4px 0; }
 .ed-tools.vertical .size-dot { height: 28px; }
+.detail { position: absolute; z-index: 1; pointer-events: none; display: block; }
+.scroll-wrap > .live { z-index: 4; }

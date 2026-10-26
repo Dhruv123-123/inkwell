@@ -1,6 +1,7 @@
 // Drawing of paper, ink and other page items. Shared by the editor,
 // thumbnails and PDF export so every surface looks the same.
 import { getBlob } from './db.js';
+import { getStroke } from '../vendor/perfect-freehand.mjs';
 
 export const PAGE_SIZES = {
   letter: [816, 1056],
@@ -113,26 +114,10 @@ export function drawPaper(ctx, w, h, template = 'lined', color = 'white', lineSc
 
 // ---- items ----
 
-// Stroke width at a point, taking pen pressure into account.
+// Pen nibs offered in the pen options.
 export const PEN_TYPES = [['fountain', 'Fountain'], ['ball', 'Ballpoint'], ['brush', 'Brush']];
 
-export function pressureWidth(item, p) {
-  if (!item.pressure) return item.width;
-  switch (item.pen) {
-    case 'ball': return item.width * (0.8 + 0.35 * p);
-    case 'brush': return item.width * (0.12 + 1.9 * Math.pow(p, 1.25));
-    default: return item.width * (0.25 + 1.1 * Math.pow(p, 0.8));
-  }
-}
-
-// Brush strokes taper at both ends even without pressure input.
-function taper(item, i, n) {
-  if (item.pen !== 'brush') return 1;
-  const k = Math.min(1, (i + 1) / 7, (n - i) / 7);
-  return 0.25 + 0.75 * k;
-}
-
-export function drawStroke(ctx, item) {
+export function drawStroke(ctx, item, live = false) {
   const pts = item.pts;
   if (!pts.length) return;
   ctx.save();
@@ -147,63 +132,70 @@ export function drawStroke(ctx, item) {
     ctx.beginPath();
     tracePath(ctx, pts);
     ctx.stroke();
-  } else if (pts.length === 1) {
-    ctx.beginPath();
-    ctx.arc(pts[0][0], pts[0][1], pressureWidth(item, pts[0][2] ?? 0.5) / 2, 0, Math.PI * 2);
-    ctx.fill();
-  } else if (!item.pressure && item.pen !== 'brush') {
-    ctx.lineWidth = item.width;
-    ctx.beginPath();
-    tracePath(ctx, pts);
-    ctx.stroke();
   } else {
-    fillInk(ctx, item, pts);
+    ctx.fill(inkPath(item, live));
   }
   ctx.restore();
 }
 
-// Variable-width ink: densify the samples along a Catmull-Rom spline, then fill
-// the union of round capsules between them. One opaque fill, so no seams,
-// beading or kinks where the width changes.
-function fillInk(ctx, item, pts) {
+// Pen ink is a filled outline from perfect-freehand: streamlined against hand
+// jitter, width driven by Pencil pressure, one smooth polygon per stroke.
+const INK = {
+  fountain: { thinning: 0.6, smoothing: 0.7, streamline: 0.45, cap: 0 },
+  ball: { thinning: 0.2, smoothing: 0.65, streamline: 0.45, cap: 0 },
+  brush: { thinning: 0.85, smoothing: 0.75, streamline: 0.5, cap: 7 },
+};
+const inkCache = new WeakMap();
+
+// Fill gaps between sparse samples (fast strokes, or browsers without coalesced
+// events) with a Catmull-Rom curve so ink never turns into straight segments.
+function densify(pts) {
   const n = pts.length;
-  const r = new Float32Array(n);
-  let w = 0;
-  for (let i = 0; i < n; i++) {
-    const t = pressureWidth(item, pts[i][2] ?? 0.5) * taper(item, i, n);
-    w = i ? w * 0.55 + t * 0.45 : t;
-    r[i] = Math.max(0.25, w / 2);
-  }
-  const P = [];
+  if (n < 3) return pts;
+  const out = [];
   for (let i = 0; i < n - 1; i++) {
     const p0 = pts[Math.max(0, i - 1)], p1 = pts[i], p2 = pts[i + 1], p3 = pts[Math.min(n - 1, i + 2)];
-    const steps = Math.max(1, Math.min(24, Math.ceil(Math.hypot(p2[0] - p1[0], p2[1] - p1[1]) / 1.2)));
-    for (let k = 0; k < steps; k++) {
+    out.push(p1);
+    const steps = Math.min(12, Math.floor(Math.hypot(p2[0] - p1[0], p2[1] - p1[1]) / 1.5));
+    for (let k = 1; k < steps; k++) {
       const t = k / steps, t2 = t * t, t3 = t2 * t;
       const cr = j => 0.5 * (2 * p1[j] + (p2[j] - p0[j]) * t + (2 * p0[j] - 5 * p1[j] + 4 * p2[j] - p3[j]) * t2 + (3 * p1[j] - p0[j] - 3 * p2[j] + p3[j]) * t3);
-      P.push(cr(0), cr(1), r[i] + (r[i + 1] - r[i]) * t);
+      out.push([cr(0), cr(1), (p1[2] ?? 0.5) + ((p2[2] ?? 0.5) - (p1[2] ?? 0.5)) * t]);
     }
   }
-  P.push(pts[n - 1][0], pts[n - 1][1], r[n - 1]);
-  ctx.beginPath();
-  for (let i = 0; i < P.length; i += 3) {
-    const x = P[i], y = P[i + 1], rr = P[i + 2];
-    ctx.moveTo(x + rr, y);
-    ctx.arc(x, y, rr, 0, Math.PI * 2);
-    if (!i) continue;
-    const px = P[i - 3], py = P[i - 2], pr = P[i - 1];
-    const dx = x - px, dy = y - py, d = Math.hypot(dx, dy);
-    if (d <= Math.abs(rr - pr) + 1e-6) continue;
-    const th = Math.atan2(dy, dx), al = Math.acos((pr - rr) / d);
-    const a1 = th + al, a2 = th - al;
-    // Clockwise like the arcs, so the nonzero fill is a clean union.
-    ctx.moveTo(px + pr * Math.cos(a2), py + pr * Math.sin(a2));
-    ctx.lineTo(x + rr * Math.cos(a2), y + rr * Math.sin(a2));
-    ctx.lineTo(x + rr * Math.cos(a1), y + rr * Math.sin(a1));
-    ctx.lineTo(px + pr * Math.cos(a1), py + pr * Math.sin(a1));
-    ctx.closePath();
+  out.push(pts[n - 1]);
+  return out;
+}
+
+export function inkPath(item, live = false) {
+  const c = inkCache.get(item);
+  if (!live && c && c.pts === item.pts && c.n === item.pts.length && c.w === item.width) return c.path;
+  const k = INK[item.pen] || INK.fountain;
+  const pressure = !!item.pressure;
+  const brush = item.pen === 'brush';
+  const taper = k.cap * item.width;
+  const outline = getStroke(densify(item.pts), {
+    size: item.width * (pressure ? 1.35 : 1),
+    thinning: pressure || brush ? k.thinning : 0,
+    smoothing: k.smoothing,
+    streamline: k.streamline,
+    simulatePressure: !pressure && brush,
+    start: { taper: brush || (pressure && taper) ? taper : 0, cap: true },
+    end: { taper: !live && brush ? taper : 0, cap: true },
+    last: !live,
+  });
+  const path = new Path2D();
+  const n = outline.length;
+  if (n) {
+    path.moveTo(outline[0][0], outline[0][1]);
+    for (let i = 0; i < n; i++) {
+      const a = outline[i], b = outline[(i + 1) % n];
+      path.quadraticCurveTo(a[0], a[1], (a[0] + b[0]) / 2, (a[1] + b[1]) / 2);
+    }
+    path.closePath();
   }
-  ctx.fill();
+  if (!live) inkCache.set(item, { pts: item.pts, n: item.pts.length, w: item.width, path });
+  return path;
 }
 
 function tracePath(ctx, pts) {
@@ -411,7 +403,7 @@ export function itemBBox(item) {
     if (p[0] < x1) x1 = p[0]; if (p[0] > x2) x2 = p[0];
     if (p[1] < y1) y1 = p[1]; if (p[1] > y2) y2 = p[1];
   }
-  const pad = (item.width || 0) / 2;
+  const pad = (item.width || 0) * (item.type === 'stroke' && (item.pressure || item.pen === 'brush') ? 1.15 : 0.5);
   return [x1 - pad, y1 - pad, x2 + pad, y2 + pad];
 }
 
