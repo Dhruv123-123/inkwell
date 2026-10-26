@@ -19,3 +19,7 @@ No build step: plain HTML, CSS and ES modules. Everything is stored on the devic
     python3 -m http.server 8000
 
 Third-party: `vendor/` contains pdf.js (Apache-2.0, see vendor/pdfjs-LICENSE).
+
+## Deploy
+Live at https://dhruv123-123.github.io/inkwell/ (GitHub Pages serves the `gh-pages` branch).
+To ship a change: bump `VERSION` in `sw.js`, commit to `main`, then `git push origin main main:gh-pages`.
