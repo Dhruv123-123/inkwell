@@ -50,7 +50,7 @@ export class StudyView {
           el('button', { class: 'btn primary small', disabled: !s.cards.length, onclick: () => this.study(s) }, due ? 'Study' : 'Review all'),
           el('button', { class: 'btn small', onclick: () => this.editSet(s) }, 'Cards'))));
     }
-    grid.append(el('button', { class: 'set-card', style: { alignItems: 'center', justifyContent: 'center', border: '2px dashed var(--line-2)', background: 'transparent', boxShadow: 'none', minHeight: '150px', color: 'var(--accent)' }, onclick: () => this.newSet() },
+    grid.append(el('button', { class: 'set-card', style: { alignItems: 'center', justifyContent: 'center', border: '1px dashed var(--line-2)', background: 'transparent', boxShadow: 'none', minHeight: '150px', color: 'var(--ink-2)' }, onclick: () => this.newSet() },
       el('span', { html: icon.plus }), el('strong', {}, 'New Study Set')));
     C.append(grid);
     if (!sets.length) C.append(el('p', { class: 'muted', style: { marginTop: '20px', maxWidth: '520px' } },

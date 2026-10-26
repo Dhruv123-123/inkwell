@@ -20,9 +20,9 @@ export function coverEl(note, { label = true } = {}) {
     const [color, pattern = 'plain'] = note.cover.split(':');
     return el('div', { class: `cover p-${pattern}`, style: { '--cv': COVER_COLORS[color] || color } },
       el('div', { class: 'cv-pattern' }),
-      label && note.title ? el('div', { class: 'cv-label' }, note.title) : null);
+      null);
   }
-  return el('div', { class: 'paper-thumb' }, note.thumb ? el('img', { src: note.thumb, alt: '' }) : el('div', { class: 'blank-thumb' }));
+  return el('div', { class: 'paper-thumb' }, note.thumb ? el('img', { src: note.thumb, alt: '' }) : el('div', { class: 'blank-thumb' + (/dark|black/.test(note.paper || '') ? ' dark' : '') }));
 }
 
 class App {
@@ -129,7 +129,7 @@ class App {
         { label: 'New Subject', icon: 'folder', action: () => this.newSubject() },
         { label: 'New Divider', icon: 'divider', action: () => this.newDivider() },
       ]) })));
-    const subjRow = s => row(s.name, el('span', { class: 'subj-icon', style: { background: s.color }, html: icon.folder }), { kind: 'subject', id: s.id },
+    const subjRow = s => row(s.name, el('span', { class: 'subj-icon', style: { '--sc': s.color }, html: icon.folder }), { kind: 'subject', id: s.id },
       count(n => n.subjectId === s.id), { menu: a => this.subjectMenu(s, a) });
     for (const s of this.subjects.filter(s => !s.dividerId || !this.dividers.find(d => d.id === s.dividerId))) L.append(subjRow(s));
     for (const d of this.dividers) {
@@ -257,7 +257,7 @@ class App {
   newNotebookDialog() {
     const s = settings();
     const state = {
-      title: '', cover: s.lastCover || 'navy:plain', template: s.template || 'lined', paper: s.paper || 'white', pageSize: s.pageSize || 'letter',
+      title: '', cover: s.lastCover || 'navy:plain', template: 'blank', paper: 'black', pageSize: s.pageSize || 'letter',
       subjectId: this.currentSubjectId(),
     };
     const box = el('div', {});
@@ -399,7 +399,7 @@ class App {
     const list = el('div', { class: 'move-list' });
     const m = sheet('Move to Subject', list);
     const opt = (label, id, color) => list.append(el('button', { class: 'side-row' + ((n.subjectId || null) === id ? ' active' : ''), onclick: async () => { n.subjectId = id; await db.put('notes', n); m.close(); this.refresh(); } },
-      color ? el('span', { class: 'subj-icon', style: { background: color }, html: icon.folder }) : el('span', { class: 'side-icon', html: icon.inbox }), el('span', { class: 'side-label' }, label)));
+      color ? el('span', { class: 'subj-icon', style: { '--sc': color }, html: icon.folder }) : el('span', { class: 'side-icon', html: icon.inbox }), el('span', { class: 'side-label' }, label)));
     opt('Unfiled', null);
     for (const s of this.subjects) opt(s.name, s.id, s.color);
     list.append(el('button', { class: 'btn block', onclick: async () => { m.close(); const s = await this.newSubject(); if (s) { n.subjectId = s.id; await db.put('notes', n); this.refresh(); } } }, '+ New Subject'));

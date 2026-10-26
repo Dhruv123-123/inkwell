@@ -81,6 +81,7 @@ export class Editor {
     this.zoom = 1;
     this.recording = null;
     this.horizontal = settings().scrollDir === 'horizontal';
+    this.adaptInk();
     this.buildDom();
     this.audio = new AudioPanel(this);
     await this.audio.load();
@@ -88,6 +89,20 @@ export class Editor {
     this.updateUndoButtons();
     this.selectTool(this.tool === 'laser' ? 'pen' : this.tool);
     this.renderTabs();
+  }
+
+  // Swap near-black ink for white on dark paper (and back on light paper) so the default pen is always visible.
+  adaptInk() {
+    const p = this.pages[0];
+    const paper = (p && p.paper) || this.note.paper;
+    const dark = !(p && p.bgBlob) && (paper === 'dark' || paper === 'black');
+    const lum = c => { const m = /^#([0-9a-f]{6})$/i.exec(c || ''); if (!m) return .5; const n = parseInt(m[1], 16); return ((n >> 16) * .299 + ((n >> 8) & 255) * .587 + (n & 255) * .114) / 255; };
+    const flip = c => dark ? (lum(c) < .2 ? '#f5f5f7' : c) : (lum(c) > .92 ? '#1c1c1e' : c);
+    for (const t of ['pen', 'shape', 'text']) {
+      const o = this.tools[t];
+      o.color = flip(o.color);
+      if (o.colors) o.colors = o.colors.map(flip);
+    }
   }
 
   async close() {
@@ -1674,6 +1689,7 @@ export class Editor {
       }
       this.noteDirty = true;
       this.flush();
+      this.adaptInk(); this.renderSwatches();
       this.rerenderAll();
       if (!this.thumbsEl.classList.contains('hidden')) this.renderThumbs();
       m.close();
