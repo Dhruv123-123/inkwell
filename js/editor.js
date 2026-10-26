@@ -159,8 +159,9 @@ export class Editor {
         ib('present', 'Present', () => this.togglePresent()),
         ib('share', 'Share & export', e => this.shareMenu(e.currentTarget)),
         ib('more', 'More', e => this.moreMenu(e.currentTarget))));
-    const toolbar = el('div', { class: 'ed-tools' },
-      this.undoBtn, this.redoBtn, el('span', { class: 'bar-sep' }), tools, el('span', { class: 'bar-sep' }), this.swatches, this.sizesEl);
+    this.grip = el('button', { class: 'icon-btn tool-grip', title: 'Drag to move the toolbar', 'aria-label': 'Move toolbar', html: icon.grip });
+    const toolbar = this.toolbar = el('div', { class: 'ed-tools' },
+      this.grip, this.undoBtn, this.redoBtn, el('span', { class: 'bar-sep' }), tools, el('span', { class: 'bar-sep' }), this.swatches, this.sizesEl);
 
     this.pagesEl = el('div', { class: 'pages' + (this.horizontal ? ' horizontal' : '') });
     if (this.horizontal) Object.assign(this.pagesEl.style, { flexDirection: 'row', alignItems: 'center', minHeight: '100%', padding: '16px 40px' });
@@ -171,9 +172,15 @@ export class Editor {
     this.audioBar = el('div', { class: 'audio-bar hidden' });
     const body = el('div', { class: 'ed-body' }, this.thumbsEl, el('div', { class: 'scroll-wrap' }, this.scroller, this.pageNum, this.audioBar), this.searchEl);
     this.root.append(nav, toolbar, body);
+    this.scrollWrap = body.querySelector('.scroll-wrap');
+    this.dockHint = el('div', { class: 'dock-hint hidden' });
+    this.scrollWrap.append(this.dockHint);
+    this.applyDock(settings().toolbarDock || 'top');
+    this.bindGrip();
+    this.root.addEventListener('gesturestart', e => e.preventDefault());
 
     this.live = el('canvas', { class: 'live' });
-    this.liveCtx = this.live.getContext('2d');
+    this.liveCtx = this.live.getContext('2d', { desynchronized: true }) || this.live.getContext('2d');
     this.selBox = el('div', { class: 'sel-box' }, el('div', { class: 'sel-handle' }));
 
     this.scroller.addEventListener('pointerdown', e => this.onDown(e));
@@ -241,7 +248,7 @@ export class Editor {
   layout() {
     if (!this.scroller) return;
     const maxW = Math.max(...this.pages.map(p => p.w), 816);
-    const avail = this.scroller.clientWidth || innerWidth;
+    const avail = (this.scroller.clientWidth || innerWidth) - (this.dock === 'left' || this.dock === 'right' ? 72 : 0);
     this.fit = Math.min(1.6, Math.max(0.3, (avail - 32) / maxW));
     if (this.horizontal) {
       // Page-by-page mode: fit the whole page on screen.
@@ -494,7 +501,7 @@ export class Editor {
   }
 
   pressureOf(e) {
-    if (e.pointerType === 'pen') return e.pressure > 0 ? e.pressure : 0.5;
+    if (e.pointerType === 'pen') return e.pressure > 0 ? Math.min(1, e.pressure) : 0.5;
     return 0.5;
   }
 
@@ -510,6 +517,13 @@ export class Editor {
     }
     if (e.pointerType === 'touch' && (this.pencilOnly || this.tool === 'hand')) return;
     if (this.tool === 'hand') return;
+    if (e.pointerType === 'pen') {
+      this.lastPenT = performance.now();
+      // A palm that started drawing before the Pencil landed loses to the Pencil.
+      if (this.active && this.active.type !== 'pen') this.cancelActive();
+      this.tapGesture = null;
+      if (this.pinch) return;
+    }
     if (this.active) return;
     if (e.pointerType === 'touch' && this.touchCount > 1) return;
     const pageNode = e.target.closest('.page');
@@ -521,7 +535,7 @@ export class Editor {
     closePopover();
     try { this.scroller.setPointerCapture(e.pointerId); } catch {}
     const pt = this.pagePoint(e, pe);
-    this.active = { id: e.pointerId, type: e.pointerType, pe, start: pt, last: pt, moved: false, t0: performance.now() };
+    this.active = { id: e.pointerId, type: e.pointerType, pe, start: pt, last: pt, moved: false, t0: performance.now(), raw: [[pt[0], pt[1], e.timeStamp]] };
     const h = this['down_' + this.tool];
     if (h) h.call(this, this.active, pt, e);
   }
@@ -537,14 +551,36 @@ export class Editor {
       if (!a.moved && Math.hypot(pt[0] - a.start[0], pt[1] - a.start[1]) * this.scale > 4) a.moved = true;
       if (h) h.call(this, a, pt, ev);
       a.last = pt;
+      a.raw.push([pt[0], pt[1], ev.timeStamp]);
+      if (a.raw.length > 6) a.raw.shift();
     }
+    if (a.type === 'pen') this.lastPenT = performance.now();
+    if (a.item) a.pred = this.predict(a, e);
     if (h) this.requestLive();
+  }
+
+  // Where the Pencil will be about one frame from now, so live ink keeps up with the tip.
+  predict(a, e) {
+    const ev = e.getPredictedEvents ? e.getPredictedEvents() : [];
+    if (ev.length) { const p = this.pagePoint(ev[ev.length - 1], a.pe); return p; }
+    const r = a.raw;
+    if (r.length < 3) return null;
+    const [x1, y1, t1] = r[r.length - 1], [x0, y0, t0] = r[0];
+    const dt = t1 - t0;
+    if (dt <= 0 || dt > 80) return null;
+    const ahead = 14, max = 14 / this.scale;
+    let dx = (x1 - x0) / dt * ahead, dy = (y1 - y0) / dt * ahead;
+    const d = Math.hypot(dx, dy);
+    if (d < 0.3 / this.scale) return null;
+    if (d > max) { dx *= max / d; dy *= max / d; }
+    return [x1 + dx, y1 + dy];
   }
 
   onUp(e, cancelled = false) {
     const a = this.active;
     if (!a || e.pointerId !== a.id) return;
     this.active = null;
+    if (a.type === 'pen') this.lastPenT = performance.now();
     clearTimeout(a.holdTimer);
     const h = this['up_' + this.tool];
     if (cancelled && e.pointerType === 'touch') { this.clearLive(); return; }
@@ -560,9 +596,21 @@ export class Editor {
   }
 
   // Touch events: palm rejection, pinch zoom, two/three-finger tap undo/redo.
+  isPalm(t) { return (t.radiusX || t.webkitRadiusX || 0) > 34; }
+
+  penBusy() { return this.active?.type === 'pen' || performance.now() - (this.lastPenT || 0) < 350; }
+
   onTouchStart(e) {
     this.touchCount = e.touches.length;
-    const stylus = [...e.touches].some(t => t.touchType === 'stylus');
+    const touches = [...e.touches];
+    const stylus = touches.some(t => t.touchType === 'stylus');
+    // Palm rejection: while the Pencil is writing (or just lifted between letters),
+    // a resting hand must not scroll, zoom, or fire the undo tap.
+    if (!stylus && this.tool !== 'hand' && (this.penBusy() || touches.some(t => this.isPalm(t)))) {
+      e.preventDefault();
+      this.tapGesture = null;
+      return;
+    }
     if (e.touches.length >= 2 && !stylus) {
       e.preventDefault();
       if (this.active && this.active.type === 'touch') this.cancelActive();
@@ -577,7 +625,7 @@ export class Editor {
     if (this.pinch && e.touches.length >= 2) { e.preventDefault(); this.updatePinch(e); return; }
     const stylus = [...e.touches].some(t => t.touchType === 'stylus');
     if (stylus && this.tool !== 'hand') e.preventDefault();
-    if (this.active && this.active.type === 'touch') e.preventDefault();
+    if (this.active) e.preventDefault();
   }
 
   onTouchEnd(e) {
@@ -672,6 +720,64 @@ export class Editor {
     this.pageNumTimer = setTimeout(() => this.pageNum.classList.remove('show'), 1200);
   }
 
+  // ---------- movable toolbar ----------
+  // Docks to the top (full width), or floats as a pill on the bottom, left or right edge.
+  applyDock(side) {
+    this.dock = side;
+    this.root.dataset.dock = side;
+    const t = this.toolbar;
+    if (side === 'top') { delete t.dataset.popSide; this.root.insertBefore(t, this.root.querySelector('.ed-body')); }
+    else { t.dataset.popSide = side; this.scrollWrap.append(t); }
+    t.classList.toggle('vertical', side === 'left' || side === 'right');
+  }
+
+  setDock(side) {
+    if (side === this.dock) return;
+    saveSettings({ toolbarDock: side });
+    this.applyDock(side);
+    this.layout();
+  }
+
+  bindGrip() {
+    const g = this.grip;
+    let drag = null;
+    const sideAt = (x, y) => {
+      const r = this.scrollWrap.getBoundingClientRect();
+      const d = { top: y - r.top, bottom: r.bottom - y, left: x - r.left, right: r.right - x };
+      // Favor the top: it is where the bar lives by default and where most people want it.
+      d.top *= 0.7;
+      return Object.keys(d).reduce((a, b) => (d[a] <= d[b] ? a : b));
+    };
+    g.addEventListener('pointerdown', e => {
+      e.preventDefault(); e.stopPropagation();
+      try { g.setPointerCapture(e.pointerId); } catch {}
+      drag = { id: e.pointerId, x: e.clientX, y: e.clientY, moved: false, side: this.dock };
+    });
+    g.addEventListener('pointermove', e => {
+      if (!drag || e.pointerId !== drag.id) return;
+      const dx = e.clientX - drag.x, dy = e.clientY - drag.y;
+      if (!drag.moved && Math.hypot(dx, dy) < 6) return;
+      drag.moved = true;
+      closePopover();
+      this.toolbar.classList.add('dragging');
+      this.toolbar.style.translate = `${dx}px ${dy}px`;
+      drag.side = sideAt(e.clientX, e.clientY);
+      this.dockHint.className = 'dock-hint dock-' + drag.side;
+    });
+    const end = e => {
+      if (!drag || e.pointerId !== drag.id) return;
+      const d = drag; drag = null;
+      this.toolbar.classList.remove('dragging');
+      this.toolbar.style.translate = '';
+      this.dockHint.className = 'dock-hint hidden';
+      if (d.moved) this.setDock(d.side);
+      else menu(g, ['top', 'bottom', 'left', 'right'].map(s => ({ label: 'Toolbar ' + s[0].toUpperCase() + s.slice(1), checked: this.dock === s, action: () => this.setDock(s) })));
+    };
+    g.addEventListener('pointerup', end);
+    g.addEventListener('pointercancel', e => { if (drag) { drag.moved = false; drag = null; this.toolbar.classList.remove('dragging'); this.toolbar.style.translate = ''; this.dockHint.className = 'dock-hint hidden'; } });
+    g.addEventListener('click', e => e.stopPropagation());
+  }
+
   // ---------- live overlay ----------
   attachLive(pe) {
     const ps = this.pxScale(pe.page);
@@ -707,7 +813,12 @@ export class Editor {
     this.attachLive(a.pe);
     this.drawLive = () => {
       this.clearLive();
-      if (a.shape) drawShape(this.liveCtx, a.shape); else drawStroke(this.liveCtx, a.item);
+      if (a.shape) { drawShape(this.liveCtx, a.shape); return; }
+      const it = a.item;
+      if (a.pred && it.pts.length > 1 && !(tool === 'highlighter' && this.tools.highlighter.straight)) {
+        const last = it.pts[it.pts.length - 1];
+        drawStroke(this.liveCtx, { ...it, pts: it.pts.concat([[a.pred[0], a.pred[1], last[2]]]) });
+      } else drawStroke(this.liveCtx, it);
     };
     this.requestLive();
   }
@@ -725,7 +836,7 @@ export class Editor {
     pts.push([sx, sy, this.pressureOf(e)]);
     if (this.shapeHold && this.tool === 'pen') {
       clearTimeout(a.holdTimer);
-      a.holdTimer = setTimeout(() => this.snapShape(a), 600);
+      a.holdTimer = setTimeout(() => this.snapShape(a), 650);
     }
   }
 
@@ -739,6 +850,10 @@ export class Editor {
 
   snapShape(a) {
     if (this.active !== a || a.shape) return;
+    const pts = a.item.pts;
+    let len = 0;
+    for (let i = 1; i < pts.length; i++) len += Math.hypot(pts[i][0] - pts[i - 1][0], pts[i][1] - pts[i - 1][1]);
+    if (len * this.scale < 40) return;
     const r = recognize(a.item.pts);
     if (!r) return;
     a.shape = { id: uid(), type: 'shape', kind: r.kind, pts: r.pts, closed: r.closed, color: a.item.color, width: a.item.width * 1.1 };

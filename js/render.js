@@ -157,21 +157,53 @@ export function drawStroke(ctx, item) {
     tracePath(ctx, pts);
     ctx.stroke();
   } else {
-    // Variable width: one short curved segment per point pair.
-    for (let i = 1; i < pts.length; i++) {
-      const a = pts[i - 1], b = pts[i];
-      const prev = i > 1 ? pts[i - 2] : a;
-      ctx.lineWidth = pressureWidth(item, (a[2] + b[2]) / 2) * taper(item, i, pts.length);
-      ctx.beginPath();
-      const m1x = (prev[0] + a[0]) / 2, m1y = (prev[1] + a[1]) / 2;
-      const m2x = (a[0] + b[0]) / 2, m2y = (a[1] + b[1]) / 2;
-      if (i === 1) { ctx.moveTo(a[0], a[1]); ctx.lineTo(m2x, m2y); }
-      else { ctx.moveTo(m1x, m1y); ctx.quadraticCurveTo(a[0], a[1], m2x, m2y); }
-      if (i === pts.length - 1) ctx.lineTo(b[0], b[1]);
-      ctx.stroke();
-    }
+    fillInk(ctx, item, pts);
   }
   ctx.restore();
+}
+
+// Variable-width ink: densify the samples along a Catmull-Rom spline, then fill
+// the union of round capsules between them. One opaque fill, so no seams,
+// beading or kinks where the width changes.
+function fillInk(ctx, item, pts) {
+  const n = pts.length;
+  const r = new Float32Array(n);
+  let w = 0;
+  for (let i = 0; i < n; i++) {
+    const t = pressureWidth(item, pts[i][2] ?? 0.5) * taper(item, i, n);
+    w = i ? w * 0.55 + t * 0.45 : t;
+    r[i] = Math.max(0.25, w / 2);
+  }
+  const P = [];
+  for (let i = 0; i < n - 1; i++) {
+    const p0 = pts[Math.max(0, i - 1)], p1 = pts[i], p2 = pts[i + 1], p3 = pts[Math.min(n - 1, i + 2)];
+    const steps = Math.max(1, Math.min(24, Math.ceil(Math.hypot(p2[0] - p1[0], p2[1] - p1[1]) / 1.2)));
+    for (let k = 0; k < steps; k++) {
+      const t = k / steps, t2 = t * t, t3 = t2 * t;
+      const cr = j => 0.5 * (2 * p1[j] + (p2[j] - p0[j]) * t + (2 * p0[j] - 5 * p1[j] + 4 * p2[j] - p3[j]) * t2 + (3 * p1[j] - p0[j] - 3 * p2[j] + p3[j]) * t3);
+      P.push(cr(0), cr(1), r[i] + (r[i + 1] - r[i]) * t);
+    }
+  }
+  P.push(pts[n - 1][0], pts[n - 1][1], r[n - 1]);
+  ctx.beginPath();
+  for (let i = 0; i < P.length; i += 3) {
+    const x = P[i], y = P[i + 1], rr = P[i + 2];
+    ctx.moveTo(x + rr, y);
+    ctx.arc(x, y, rr, 0, Math.PI * 2);
+    if (!i) continue;
+    const px = P[i - 3], py = P[i - 2], pr = P[i - 1];
+    const dx = x - px, dy = y - py, d = Math.hypot(dx, dy);
+    if (d <= Math.abs(rr - pr) + 1e-6) continue;
+    const th = Math.atan2(dy, dx), al = Math.acos((pr - rr) / d);
+    const a1 = th + al, a2 = th - al;
+    // Clockwise like the arcs, so the nonzero fill is a clean union.
+    ctx.moveTo(px + pr * Math.cos(a2), py + pr * Math.sin(a2));
+    ctx.lineTo(x + rr * Math.cos(a2), y + rr * Math.sin(a2));
+    ctx.lineTo(x + rr * Math.cos(a1), y + rr * Math.sin(a1));
+    ctx.lineTo(px + pr * Math.cos(a1), py + pr * Math.sin(a1));
+    ctx.closePath();
+  }
+  ctx.fill();
 }
 
 function tracePath(ctx, pts) {

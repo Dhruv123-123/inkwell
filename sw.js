@@ -1,5 +1,5 @@
 // Offline support: precache the app shell, serve it cache-first.
-const VERSION = 'inkwell-v3';
+const VERSION = 'inkwell-v4';
 const ASSETS = [
   './', 'index.html', 'manifest.webmanifest', 'css/app.css',
   'js/app.js', 'js/db.js', 'js/ui.js', 'js/render.js', 'js/store.js', 'js/editor.js', 'js/audio.js', 'js/shapes.js', 'js/study.js',

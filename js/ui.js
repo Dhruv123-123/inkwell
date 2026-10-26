@@ -21,6 +21,7 @@ export const icon = {
   pause: P('<rect x="6" y="5" width="4" height="14" rx="1" fill="currentColor"/><rect x="14" y="5" width="4" height="14" rx="1" fill="currentColor"/>'),
   search: P('<circle cx="11" cy="11" r="7"/><path d="M20 20l-3.5-3.5"/>'),
   pages: P('<rect x="4" y="3" width="10" height="13" rx="1.5"/><rect x="10" y="8" width="10" height="13" rx="1.5"/>'),
+  grip: P('<circle cx="9" cy="6" r="1.25" fill="currentColor" stroke="none"/><circle cx="15" cy="6" r="1.25" fill="currentColor" stroke="none"/><circle cx="9" cy="12" r="1.25" fill="currentColor" stroke="none"/><circle cx="15" cy="12" r="1.25" fill="currentColor" stroke="none"/><circle cx="9" cy="18" r="1.25" fill="currentColor" stroke="none"/><circle cx="15" cy="18" r="1.25" fill="currentColor" stroke="none"/>'),
   more: P('<circle cx="5" cy="12" r="1.3" fill="currentColor"/><circle cx="12" cy="12" r="1.3" fill="currentColor"/><circle cx="19" cy="12" r="1.3" fill="currentColor"/>'),
   share: P('<path d="M12 3v13M7.5 7.5L12 3l4.5 4.5"/><path d="M5 12v7a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2v-7"/>'),
   trash: P('<path d="M4 7h16M10 11v6M14 11v6M6 7l1 13h10l1-13M9 7V4h6v3"/>'),
@@ -143,10 +144,16 @@ export function popover(anchor, content, { cls = '' } = {}) {
   root().append(back);
   const r = anchor.getBoundingClientRect();
   const pw = pop.offsetWidth, ph = pop.offsetHeight;
+  // Anchors inside a side-docked toolbar open beside it instead of below.
+  const side = anchor.closest && anchor.closest('[data-pop-side]')?.dataset.popSide;
   let left = r.left + r.width / 2 - pw / 2;
-  left = Math.max(8, Math.min(left, innerWidth - pw - 8));
   let top = r.bottom + 8;
-  if (top + ph > innerHeight - 8) top = Math.max(8, r.top - ph - 8);
+  if (side === 'left') left = r.right + 10;
+  if (side === 'right') left = r.left - pw - 10;
+  if (side === 'left' || side === 'right') top = r.top + r.height / 2 - ph / 2;
+  if (side === 'bottom' || top + ph > innerHeight - 8) top = r.top - ph - 8;
+  left = Math.max(8, Math.min(left, innerWidth - pw - 8));
+  top = Math.max(8, Math.min(top, innerHeight - ph - 8));
   pop.style.left = left + 'px';
   pop.style.top = top + 'px';
   const close = () => { back.remove(); if (openPop === api) openPop = null; };

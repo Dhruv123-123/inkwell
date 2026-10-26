@@ -437,6 +437,35 @@ mark { background: #ffe066; color: #000; border-radius: 2px; padding: 0 1px; }
   .bar-sep { margin: 0 5px; }
   .audio-bar .skip { display: none; }
 }
+/* movable toolbar */
+.tool-grip { width: 22px; color: var(--muted); cursor: grab; touch-action: none; margin-right: 4px; }
+.tool-grip svg { width: 16px; height: 16px; }
+.ed-tools.dragging { z-index: 40; box-shadow: var(--pop-shadow); opacity: .96; transition: none; }
+#editor:not([data-dock="top"]) .ed-tools { position: absolute; z-index: 9; background: var(--panel); border: 1px solid var(--line-2); border-radius: 14px; box-shadow: var(--pop-shadow); padding: 5px; }
+#editor[data-dock="bottom"] .ed-tools { left: 50%; bottom: calc(14px + var(--sb)); transform: translateX(-50%); max-width: calc(100% - 24px); width: max-content; justify-content: flex-start; }
+.ed-tools.vertical { flex-direction: column; top: 50%; transform: translateY(-50%); max-height: calc(100% - 24px); overflow-y: auto; overflow-x: hidden; justify-content: flex-start; gap: 1px; }
+#editor[data-dock="left"] .ed-tools { left: calc(10px + var(--sl)); }
+#editor[data-dock="right"] .ed-tools { right: calc(10px + var(--sr)); }
+.ed-tools.vertical .tool-group, .ed-tools.vertical .swatches, .ed-tools.vertical .sizes { flex-direction: column; }
+.ed-tools.vertical .bar-sep { width: 22px; height: 1px; margin: 6px 0; }
+.ed-tools.vertical .swatches .swatch { margin: 5px 0; }
+.ed-tools.vertical .sizes { margin: 6px 0 0; padding: 6px 0 0; border-left: 0; border-top: 1px solid var(--line-2); }
+.ed-tools.vertical .tool-grip { margin: 0 0 2px; height: 22px; transform: rotate(90deg); }
+#editor[data-dock="left"] .pages { padding-left: 88px; }
+#editor[data-dock="right"] .pages { padding-right: 88px; }
+#editor[data-dock="bottom"] .pages { padding-bottom: 120px; }
+#editor[data-dock="bottom"] .audio-bar { bottom: 66px; }
+#editor[data-dock="bottom"] .page-num { bottom: calc(80px + var(--sb)); }
+.dock-hint { position: absolute; z-index: 8; border-radius: 14px; background: var(--accent-soft); border: 1.5px dashed var(--accent); pointer-events: none; }
+.dock-hint.dock-top { left: 10px; right: 10px; top: 8px; height: 52px; }
+.dock-hint.dock-bottom { left: 25%; right: 25%; bottom: calc(12px + var(--sb)); height: 56px; }
+.dock-hint.dock-left { left: 8px; top: 15%; bottom: 15%; width: 58px; }
+.dock-hint.dock-right { right: 8px; top: 15%; bottom: 15%; width: 58px; }
+
+/* Pencil: no text selection, callouts, loupe or drag ghosts anywhere on the writing surface */
+.scroller, .pages, .page, .page canvas, .live { -webkit-user-select: none; user-select: none; -webkit-touch-callout: none; -webkit-user-drag: none; }
+.page canvas { touch-action: inherit; }
+
 #print-root { display: none; }
 @media print {
   @page { margin: 0; }
@@ -445,3 +474,7 @@ mark { background: #ffe066; color: #000; border-radius: 2px; padding: 0 1px; }
   #print-root { display: block; }
   #print-root img { width: 100%; display: block; page-break-after: always; }
 }
+.ed-tools.dragging { width: max-content; max-width: calc(100vw - 24px); border: 1px solid var(--line-2); border-radius: 14px; background: var(--panel); }
+.ed-tools.vertical .icon-btn.tool, .ed-tools.vertical .icon-btn { height: 35px; }
+.ed-tools.vertical .swatches .swatch { margin: 4px 0; }
+.ed-tools.vertical .size-dot { height: 28px; }
