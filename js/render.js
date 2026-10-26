@@ -1,7 +1,7 @@
 // Drawing of paper, ink and other page items. Shared by the editor,
 // thumbnails and PDF export so every surface looks the same.
 import { getBlob } from './db.js';
-import { getStroke } from '../vendor/perfect-freehand.mjs';
+import { drawInk } from './ink.js';
 
 export const PAGE_SIZES = {
   letter: [816, 1056],
@@ -117,7 +117,7 @@ export function drawPaper(ctx, w, h, template = 'lined', color = 'white', lineSc
 // Pen nibs offered in the pen options.
 export const PEN_TYPES = [['fountain', 'Fountain'], ['ball', 'Ballpoint'], ['brush', 'Brush']];
 
-export function drawStroke(ctx, item, live = false) {
+export function drawStroke(ctx, item) {
   const pts = item.pts;
   if (!pts.length) return;
   ctx.save();
@@ -133,69 +133,9 @@ export function drawStroke(ctx, item, live = false) {
     tracePath(ctx, pts);
     ctx.stroke();
   } else {
-    ctx.fill(inkPath(item, live));
+    drawInk(ctx, item);
   }
   ctx.restore();
-}
-
-// Pen ink is a filled outline from perfect-freehand: streamlined against hand
-// jitter, width driven by Pencil pressure, one smooth polygon per stroke.
-const INK = {
-  fountain: { thinning: 0.6, smoothing: 0.7, streamline: 0.45, cap: 0 },
-  ball: { thinning: 0.2, smoothing: 0.65, streamline: 0.45, cap: 0 },
-  brush: { thinning: 0.85, smoothing: 0.75, streamline: 0.5, cap: 7 },
-};
-const inkCache = new WeakMap();
-
-// Fill gaps between sparse samples (fast strokes, or browsers without coalesced
-// events) with a Catmull-Rom curve so ink never turns into straight segments.
-function densify(pts) {
-  const n = pts.length;
-  if (n < 3) return pts;
-  const out = [];
-  for (let i = 0; i < n - 1; i++) {
-    const p0 = pts[Math.max(0, i - 1)], p1 = pts[i], p2 = pts[i + 1], p3 = pts[Math.min(n - 1, i + 2)];
-    out.push(p1);
-    const steps = Math.min(12, Math.floor(Math.hypot(p2[0] - p1[0], p2[1] - p1[1]) / 1.5));
-    for (let k = 1; k < steps; k++) {
-      const t = k / steps, t2 = t * t, t3 = t2 * t;
-      const cr = j => 0.5 * (2 * p1[j] + (p2[j] - p0[j]) * t + (2 * p0[j] - 5 * p1[j] + 4 * p2[j] - p3[j]) * t2 + (3 * p1[j] - p0[j] - 3 * p2[j] + p3[j]) * t3);
-      out.push([cr(0), cr(1), (p1[2] ?? 0.5) + ((p2[2] ?? 0.5) - (p1[2] ?? 0.5)) * t]);
-    }
-  }
-  out.push(pts[n - 1]);
-  return out;
-}
-
-export function inkPath(item, live = false) {
-  const c = inkCache.get(item);
-  if (!live && c && c.pts === item.pts && c.n === item.pts.length && c.w === item.width) return c.path;
-  const k = INK[item.pen] || INK.fountain;
-  const pressure = !!item.pressure;
-  const brush = item.pen === 'brush';
-  const taper = k.cap * item.width;
-  const outline = getStroke(densify(item.pts), {
-    size: item.width * (pressure ? 1.35 : 1),
-    thinning: pressure || brush ? k.thinning : 0,
-    smoothing: k.smoothing,
-    streamline: k.streamline,
-    simulatePressure: !pressure && brush,
-    start: { taper: brush || (pressure && taper) ? taper : 0, cap: true },
-    end: { taper: !live && brush ? taper : 0, cap: true },
-    last: !live,
-  });
-  const path = new Path2D();
-  const n = outline.length;
-  if (n) {
-    path.moveTo(outline[0][0], outline[0][1]);
-    for (let i = 0; i < n; i++) {
-      const a = outline[i], b = outline[(i + 1) % n];
-      path.quadraticCurveTo(a[0], a[1], (a[0] + b[0]) / 2, (a[1] + b[1]) / 2);
-    }
-    path.closePath();
-  }
-  if (!live) inkCache.set(item, { pts: item.pts, n: item.pts.length, w: item.width, path });
-  return path;
 }
 
 function tracePath(ctx, pts) {

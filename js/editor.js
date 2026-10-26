@@ -6,6 +6,7 @@ import {
   PEN_TYPES, TAPE_COLORS, drawTape, drawPaper,
 } from './render.js';
 import { recognize } from './shapes.js';
+import { InkBuilder, strokeSegment } from './ink.js';
 import {
   icon, el, toast, menu, popover, closePopover, prompt, confirm, sheet, pickFile,
   shareOrDownload, COLORS, HL_COLORS, fmtTime,
@@ -181,6 +182,9 @@ export class Editor {
 
     this.live = el('canvas', { class: 'live' });
     this.liveCtx = this.live.getContext('2d', { desynchronized: true }) || this.live.getContext('2d');
+    // The pen tip: the short, not-yet-fitted end of the stroke, redrawn every event.
+    this.tip = el('canvas', { class: 'live' });
+    this.tipCtx = this.tip.getContext('2d', { desynchronized: true }) || this.tip.getContext('2d');
     this.selBox = el('div', { class: 'sel-box' }, el('div', { class: 'sel-handle' }));
 
     this.scroller.addEventListener('pointerdown', e => this.onDown(e));
@@ -559,7 +563,8 @@ export class Editor {
       a.last = pt;
     }
     if (a.type === 'pen') this.lastPenT = performance.now();
-    if (h) this.requestLive();
+    if (a.ink && !a.shape) this.drawTip(a);
+    else if (h) this.requestLive();
   }
 
   onUp(e, cancelled = false) {
@@ -851,23 +856,49 @@ export class Editor {
   // resolution, mapped onto the page being written on and clipped to it.
   attachLive(pe) {
     const wrap = this.scrollWrap, dpr = window.devicePixelRatio || 1;
-    if (this.live.parentNode !== wrap) wrap.insertBefore(this.live, this.scroller.nextSibling);
     const W = Math.round(wrap.clientWidth * dpr), H = Math.round(wrap.clientHeight * dpr);
-    if (this.live.width !== W || this.live.height !== H) { this.live.width = W; this.live.height = H; }
-    const ctx = this.liveCtx;
-    if (this.liveClipped) ctx.restore();
-    ctx.setTransform(1, 0, 0, 1, 0, 0);
-    ctx.clearRect(0, 0, W, H);
     const wr = wrap.getBoundingClientRect(), pr = pe.el.getBoundingClientRect(), k = this.scale * dpr;
-    ctx.save();
-    ctx.setTransform(k, 0, 0, k, (pr.left - wr.left) * dpr, (pr.top - wr.top) * dpr);
-    ctx.beginPath(); ctx.rect(0, 0, pe.page.w, pe.page.h); ctx.clip();
+    for (const [c, ctx] of [[this.live, this.liveCtx], [this.tip, this.tipCtx]]) {
+      if (c.parentNode !== wrap) wrap.insertBefore(c, this.scroller.nextSibling);
+      if (c.width !== W || c.height !== H) { c.width = W; c.height = H; }
+      if (this.liveClipped) ctx.restore();
+      ctx.setTransform(1, 0, 0, 1, 0, 0);
+      ctx.clearRect(0, 0, W, H);
+      ctx.save();
+      ctx.setTransform(k, 0, 0, k, (pr.left - wr.left) * dpr, (pr.top - wr.top) * dpr);
+      ctx.beginPath(); ctx.rect(0, 0, pe.page.w, pe.page.h); ctx.clip();
+    }
     this.liveClipped = true;
     this.livePe = pe;
+    this.tipBox = null;
   }
 
   clearLive() {
-    if (this.livePe) this.liveCtx.clearRect(0, 0, this.livePe.page.w, this.livePe.page.h);
+    if (!this.livePe) return;
+    this.liveCtx.clearRect(0, 0, this.livePe.page.w, this.livePe.page.h);
+    this.tipCtx.clearRect(0, 0, this.livePe.page.w, this.livePe.page.h);
+    this.tipBox = null;
+  }
+
+  // Joins the fitted ink to the exact Pencil position, so the line never trails the tip.
+  drawTip(a) {
+    const ctx = this.tipCtx, pts = a.item.pts, n = pts.length, raw = a.tipPt;
+    if (this.tipBox) { const b = this.tipBox; ctx.clearRect(b[0], b[1], b[2] - b[0], b[3] - b[1]); }
+    const path = [n > 1 ? pts[n - 2] : pts[0], pts[n - 1], raw];
+    const w = a.ink.w;
+    let x1 = Infinity, y1 = Infinity, x2 = -Infinity, y2 = -Infinity;
+    for (const p of path) { x1 = Math.min(x1, p[0]); y1 = Math.min(y1, p[1]); x2 = Math.max(x2, p[0]); y2 = Math.max(y2, p[1]); }
+    const pad = w + 2 / this.scale;
+    this.tipBox = [x1 - pad, y1 - pad, x2 + pad, y2 + pad];
+    ctx.strokeStyle = a.item.color;
+    ctx.lineWidth = w;
+    ctx.lineCap = 'round';
+    ctx.lineJoin = 'round';
+    ctx.beginPath();
+    ctx.moveTo(path[0][0], path[0][1]);
+    ctx.lineTo(path[1][0], path[1][1]);
+    ctx.lineTo(path[2][0], path[2][1]);
+    ctx.stroke();
   }
 
   requestLive() {
@@ -888,6 +919,14 @@ export class Editor {
     this.audio.tag(item);
     a.item = item;
     this.attachLive(a.pe);
+    if (tool === 'pen') {
+      a.ink = new InkBuilder(item);
+      a.ink.push(item.pts[0]);
+      a.tipPt = item.pts[0];
+      this.drawLive = () => { if (a.shape) { this.clearLive(); drawShape(this.liveCtx, a.shape); } };
+      this.drawTip(a);
+      return;
+    }
     // Only the stroke's own box is cleared and repainted each frame, so the GPU
     // uploads a few thousand pixels instead of the whole screen.
     let box = null;
@@ -898,7 +937,7 @@ export class Editor {
       box = box ? [Math.min(box[0], nb[0] - pad), Math.min(box[1], nb[1] - pad), Math.max(box[2], nb[2] + pad), Math.max(box[3], nb[3] + pad)]
         : [nb[0] - pad, nb[1] - pad, nb[2] + pad, nb[3] + pad];
       this.liveCtx.clearRect(box[0], box[1], box[2] - box[0], box[3] - box[1]);
-      drawStroke(this.liveCtx, it, true);
+      drawStroke(this.liveCtx, it);
     };
     this.requestLive();
   }
@@ -910,8 +949,18 @@ export class Editor {
     if (a.shape) return;
     const pts = a.item.pts;
     const last = pts[pts.length - 1];
-    if (Math.hypot(pt[0] - last[0], pt[1] - last[1]) < 0.25 / this.scale) return;
-    pts.push([pt[0], pt[1], this.pressureOf(e)]);
+    const pr = this.pressureOf(e);
+    a.tipPt = [pt[0], pt[1], pr];
+    const d = Math.hypot(pt[0] - last[0], pt[1] - last[1]) * this.scale;
+    if (d < 0.35) return;
+    if (a.ink) {
+      // Light, speed-aware smoothing: steadies slow strokes, stays out of the way of fast ones.
+      const k = Math.min(1, 0.55 + d / 10);
+      const p = [last[0] + (pt[0] - last[0]) * k, last[1] + (pt[1] - last[1]) * k, pr];
+      pts.push(p);
+      const seg = a.ink.push(p);
+      if (seg) strokeSegment(this.liveCtx, seg, a.item.color);
+    } else pts.push([pt[0], pt[1], pr]);
     if (this.shapeHold && this.tool === 'pen') {
       clearTimeout(a.holdTimer);
       a.holdTimer = setTimeout(() => this.snapShape(a), 650);
@@ -950,7 +999,10 @@ export class Editor {
   }
 
   addItems(pe, items) {
-    this.record(pe.page, () => pe.page.items.push(...items));
+    // Adding is the hot path after every stroke: undo stores just the new items
+    // instead of a copy of the whole page.
+    pe.page.items.push(...items);
+    this.pushUndo({ kind: 'add', pageId: pe.page.id, items: structuredClone(items) }, pe.page);
     for (const it of items) this.drawOnPage(pe, it);
     if (items.some(i => i.type === 'text' || i.type === 'image')) this.rerender(pe);
   }
@@ -1488,6 +1540,16 @@ export class Editor {
         this.markDirty(page);
         if (pe) this.rerender(pe);
       }
+    } else if (e.kind === 'add') {
+      const pe = this.pageEls.get(e.pageId);
+      const page = this.pages.find(p => p.id === e.pageId);
+      if (page) {
+        const ids = new Set(e.items.map(i => i.id));
+        page.items = page.items.filter(i => !ids.has(i.id));
+        if (which === 'after') page.items.push(...structuredClone(e.items));
+        this.markDirty(page);
+        if (pe) this.rerender(pe);
+      }
     } else if (e.kind === 'pages') {
       this.applyPagesState(e[which], true);
     }
@@ -1529,7 +1591,8 @@ export class Editor {
 
   scheduleSave() {
     clearTimeout(this.saveTimer);
-    this.saveTimer = setTimeout(() => this.flush(), 700);
+    // Saving serializes whole pages, so wait for a real pause and never run mid-stroke.
+    this.saveTimer = setTimeout(() => (this.active ? this.scheduleSave() : this.flush()), 1800);
   }
 
   async flush() {
