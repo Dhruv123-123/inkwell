@@ -15,6 +15,15 @@ No build step: plain HTML, CSS and ES modules. Everything is stored on the devic
 - Export to PDF, page as image, print, per-note and full-library backup/restore
 - Offline via service worker; Pencil-only drawing with palm rejection
 
+## Pro features
+- Notebook covers (15 colors × 6 patterns), new-notebook dialog with paper, size and subject
+- Tabs for open notebooks, grid/list library, light/dark/auto theme
+- Pen types (fountain, ballpoint, brush) with customizable color and size presets
+- Tape for self-testing, stickers, sticky notes and saved "My Elements"
+- Study sets: flashcards from text or lasso selections, spaced repetition review
+- Live audio transcription (Web Speech API where available), searchable and tap-to-seek
+- Outline from titled bookmarks, presentation mode, horizontal page scrolling
+
 ## Run locally
     python3 -m http.server 8000
 

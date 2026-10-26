@@ -3,6 +3,7 @@
 import { db, uid, putBlob, getBlob } from './db.js';
 import { hitItem } from './render.js';
 import { icon, el, toast, menu, prompt, confirm, fmtTime, shareOrDownload } from './ui.js';
+import { settings } from './store.js';
 
 const SPEEDS = [1, 1.25, 1.5, 2, 0.75];
 
@@ -15,7 +16,7 @@ export class AudioPanel {
     this.speed = 1;
     this.audio = new Audio();
     this.audio.preload = 'auto';
-    this.audio.addEventListener('timeupdate', () => this.updateTime());
+    this.audio.addEventListener('timeupdate', () => { this.updateTime(); this.highlightSegment(); });
     this.audio.addEventListener('play', () => { this.renderControls(); this.startReplayLoop(); });
     this.audio.addEventListener('pause', () => { this.renderControls(); this.stopReplayLoop(); });
     this.audio.addEventListener('ended', () => { this.renderControls(); this.stopReplayLoop(); this.ed.rerenderAll(); });
@@ -56,6 +57,7 @@ export class AudioPanel {
     this.audio.pause();
     this.rs = { id: uid(), start: Date.now(), rec, stream, chunks, type: rec.mimeType || type || 'audio/mp4' };
     rec.start(1000);
+    this.startTranscriber();
     this.ed.recording = true;
     this.ed.micBtn.classList.add('recording');
     this.ed.micBtn.innerHTML = icon.stop;
@@ -76,6 +78,7 @@ export class AudioPanel {
     this.ed.micBtn.classList.remove('recording');
     this.ed.micBtn.innerHTML = icon.mic;
     this.ed.micBtn.title = 'Record audio';
+    const transcript = this.stopTranscriber();
     await new Promise(res => { rs.rec.onstop = res; rs.rec.stop(); });
     rs.stream.getTracks().forEach(t => t.stop());
     const blob = new Blob(rs.chunks, { type: rs.type.split(';')[0] || 'audio/mp4' });
@@ -83,12 +86,112 @@ export class AudioPanel {
     const r = {
       id: rs.id, noteId: this.ed.note.id, blob: await putBlob(blob), duration, created: rs.start,
       name: 'Recording ' + new Date(rs.start).toLocaleString([], { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }),
+      transcript,
     };
     await db.put('recordings', r);
+    this.ed.note.hasAudio = true;
+    this.ed.scheduleSave();
     this.recs.push(r);
     await this.select(r);
     this.showBar(true);
     toast('Recording saved');
+  }
+
+  // ---- live transcription (Web Speech API, where the browser offers it) ----
+  startTranscriber() {
+    this.segments = [];
+    const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+    if (!SR || settings().transcribe === false) return;
+    const rs = this.rs;
+    let segStart = null;
+    const make = () => {
+      const r = new SR();
+      r.continuous = true;
+      r.interimResults = true;
+      r.lang = navigator.language || 'en-US';
+      r.onresult = e => {
+        for (let i = e.resultIndex; i < e.results.length; i++) {
+          const res = e.results[i];
+          if (segStart == null) segStart = Math.max(0, Date.now() - rs.start - 1500);
+          if (res.isFinal) {
+            const text = res[0].transcript.trim();
+            if (text) this.segments.push({ t: segStart, text });
+            segStart = null;
+            this.ed.recTime.title = text;
+          }
+        }
+      };
+      r.onerror = e => {
+        if (e.error === 'not-allowed' || e.error === 'service-not-allowed' || e.error === 'audio-capture') {
+          this.srDead = true;
+          toast('Live transcript is not available here; audio is still recording');
+        }
+      };
+      // Safari ends recognition after silence; keep it going while recording.
+      r.onend = () => { if (this.rs === rs && !this.srDead) { try { this.sr = make(); this.sr.start(); } catch {} } };
+      return r;
+    };
+    this.srDead = false;
+    try { this.sr = make(); this.sr.start(); } catch { this.sr = null; }
+  }
+
+  stopTranscriber() {
+    const sr = this.sr;
+    this.sr = null;
+    if (sr) { sr.onend = null; try { sr.stop(); } catch {} }
+    return this.segments || [];
+  }
+
+  transcriptText() {
+    return this.recs.map(r => (r.transcript || []).map(s => s.text).join(' ')).join('\n');
+  }
+
+  async seekTo(r, t) {
+    if (!this.cur || this.cur.id !== r.id) await this.select(r);
+    this.showBar(false);
+    const go = () => { this.audio.currentTime = Math.max(0, t / 1000 - 0.5); this.audio.play(); };
+    if (this.audio.readyState >= 1) go(); else this.audio.addEventListener('loadedmetadata', go, { once: true });
+  }
+
+  toggleTranscript() {
+    const box = this.ed.searchEl;
+    const open = !box.classList.contains('hidden') && box.classList.contains('transcript-panel');
+    if (open) { box.classList.add('hidden'); box.classList.remove('transcript-panel'); setTimeout(() => this.ed.layout(), 20); return; }
+    box.classList.remove('hidden');
+    box.classList.add('transcript-panel');
+    this.renderTranscript();
+    setTimeout(() => this.ed.layout(), 20);
+  }
+
+  renderTranscript() {
+    const box = this.ed.searchEl;
+    box.innerHTML = '';
+    const r = this.cur;
+    const list = el('div', { class: 'search-results' });
+    box.append(el('div', { class: 'search-head' }, el('strong', { style: { flex: 1, paddingLeft: '6px' } }, 'Transcript'),
+      el('button', { class: 'icon-btn', html: icon.close, onclick: () => this.toggleTranscript() })), list);
+    const segs = (r && r.transcript) || [];
+    if (!segs.length) {
+      list.append(el('p', { class: 'muted pad', style: { fontSize: '13.5px' } }, r ? 'No transcript for this recording. Live transcription runs while recording when the browser supports speech recognition (turn it on in Settings).' : 'No recording selected.'));
+      return;
+    }
+    this.segEls = segs.map(sg => {
+      const b = el('button', { class: 'ts-seg', onclick: () => this.seekTo(r, sg.t) }, el('span', { class: 'ts-time' }, fmtTime(sg.t / 1000)), el('span', {}, sg.text));
+      list.append(b);
+      return [sg.t, b];
+    });
+    list.append(el('button', { class: 'btn small', style: { margin: '10px' }, onclick: () => {
+      const txt = segs.map(sg => `[${fmtTime(sg.t / 1000)}] ${sg.text}`).join('\n');
+      shareOrDownload(new Blob([txt], { type: 'text/plain' }), `${r.name} transcript.txt`);
+    } }, 'Export transcript'));
+  }
+
+  highlightSegment() {
+    if (!this.segEls || this.ed.searchEl.classList.contains('hidden')) return;
+    const t = this.audio.currentTime * 1000;
+    let cur = null;
+    for (const [st, b] of this.segEls) { b.classList.remove('now'); if (st <= t) cur = b; }
+    if (cur) cur.classList.add('now');
   }
 
   // ---- playback ----
@@ -103,6 +206,7 @@ export class AudioPanel {
     this.url = URL.createObjectURL(blob);
     this.audio.src = this.url;
     this.audio.playbackRate = this.speed;
+    if (this.ed.searchEl && this.ed.searchEl.classList.contains('transcript-panel') && !this.ed.searchEl.classList.contains('hidden')) this.renderTranscript();
   }
 
   replayActive() {
@@ -201,10 +305,11 @@ export class AudioPanel {
     } }, 'Replay notes');
     bar.append(
       pick,
-      el('button', { class: 'icon-btn small', title: 'Back 15s', onclick: () => { this.audio.currentTime = Math.max(0, this.audio.currentTime - 15); this.ed.rerenderAll(); } }, '−15'),
+      el('button', { class: 'icon-btn small skip', title: 'Back 15s', onclick: () => { this.audio.currentTime = Math.max(0, this.audio.currentTime - 15); this.ed.rerenderAll(); } }, '−15'),
       this.playBtn,
-      el('button', { class: 'icon-btn small', title: 'Forward 15s', onclick: () => { this.audio.currentTime = Math.min(this.duration() || 0, this.audio.currentTime + 15); this.ed.rerenderAll(); } }, '+15'),
+      el('button', { class: 'icon-btn small skip', title: 'Forward 15s', onclick: () => { this.audio.currentTime = Math.min(this.duration() || 0, this.audio.currentTime + 15); this.ed.rerenderAll(); } }, '+15'),
       this.scrub, this.timeEl, speedBtn, replayBtn,
+      el('button', { class: 'icon-btn small', html: icon.transcript, title: 'Transcript', onclick: () => this.toggleTranscript() }),
       el('button', { class: 'icon-btn small', html: icon.more, onclick: e => this.recMenu(e.currentTarget) }),
       el('button', { class: 'icon-btn small', html: icon.close, title: 'Hide', onclick: () => this.hideBar() }));
     this.renderControls();

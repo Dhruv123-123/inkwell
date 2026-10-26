@@ -2,6 +2,13 @@
 import { db, uid, putBlob, getBlob } from './db.js';
 import { PAGE_SIZES, renderPage } from './render.js';
 
+export const COVER_COLORS = {
+  navy: '#2d3f6b', cobalt: '#3a63d8', sky: '#5aa9e6', teal: '#1f8a8a', forest: '#2f6650', sage: '#8fae8b',
+  mustard: '#d9a326', coral: '#ec6f5a', crimson: '#a8323e', blush: '#e7a3b6', lavender: '#9a8ad1', plum: '#5f3d73',
+  kraft: '#c49a6c', charcoal: '#3a3a3e', ivory: '#e9e2cf',
+};
+export const COVER_PATTERNS = ['plain', 'dots', 'stripes', 'grid', 'linen', 'band'];
+
 export const SUBJECT_COLORS = ['#e5383b', '#f77f00', '#f6c90e', '#2a9d4b', '#14a3a3', '#1f6feb', '#5e3fd3', '#c13b8d', '#8b5a2b', '#5b5f66'];
 
 export function settings() {
@@ -18,7 +25,7 @@ export function newPage(note, size) {
   return { id: uid(), noteId: note.id, w, h, items: [] };
 }
 
-export async function createNote({ title, subjectId = null, template, paper, pageSize, pages } = {}) {
+export async function createNote({ title, subjectId = null, template, paper, pageSize, pages, cover = null } = {}) {
   const s = settings();
   const note = {
     id: uid(),
@@ -31,6 +38,7 @@ export async function createNote({ title, subjectId = null, template, paper, pag
     pageSize: pageSize || s.pageSize || 'letter',
     pageIds: [],
     favorite: false,
+    cover,
     thumb: null,
     searchText: '',
   };
@@ -239,6 +247,7 @@ export async function exportBackup(noteIds = null) {
   const blobIds = new Set();
   for (const p of out.pages) { if (p.bgBlob) blobIds.add(p.bgBlob); for (const it of p.items) if (it.type === 'image') blobIds.add(it.blob); }
   for (const r of out.recordings) blobIds.add(r.blob);
+  if (!noteIds) { out.study = await db.all('study'); out.elements = await db.all('elements'); for (const e of out.elements) blobIds.add(e.blob); }
   out.blobs = [];
   for (const id of blobIds) {
     const b = await getBlob(id);
@@ -259,5 +268,7 @@ export async function importBackup(file) {
   await db.putMany('pages', data.pages || []);
   await db.putMany('recordings', data.recordings || []);
   await db.putMany('notes', data.notes || []);
+  await db.putMany('study', data.study || []);
+  await db.putMany('elements', data.elements || []);
   return (data.notes || []).length;
 }

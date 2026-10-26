@@ -33,21 +33,21 @@ export const TEMPLATES = [
   ['todo', 'Checklist'],
 ];
 
-export function drawPaper(ctx, w, h, template = 'lined', color = 'white') {
+export function drawPaper(ctx, w, h, template = 'lined', color = 'white', lineScale = 1) {
   const pc = PAPER_COLORS[color] || PAPER_COLORS.white;
   ctx.fillStyle = pc.bg;
   ctx.fillRect(0, 0, w, h);
   ctx.save();
   ctx.strokeStyle = pc.line;
   ctx.fillStyle = pc.line;
-  ctx.lineWidth = 1;
+  ctx.lineWidth = lineScale;
   const hLines = (gap, top = 96, left = 0) => {
     ctx.beginPath();
     for (let y = top; y < h - 24; y += gap) { ctx.moveTo(left, y + 0.5); ctx.lineTo(w, y + 0.5); }
     ctx.stroke();
   };
   const margin = x => {
-    ctx.save(); ctx.strokeStyle = pc.margin; ctx.beginPath();
+    ctx.save(); ctx.strokeStyle = pc.margin; ctx.lineWidth = lineScale; ctx.beginPath();
     ctx.moveTo(x + 0.5, 0); ctx.lineTo(x + 0.5, h); ctx.stroke(); ctx.restore();
   };
   const grid = gap => {
@@ -64,7 +64,7 @@ export function drawPaper(ctx, w, h, template = 'lined', color = 'white') {
     case 'smallgrid': ctx.globalAlpha = 0.7; grid(16); break;
     case 'dotted':
       for (let y = 24; y < h; y += 24) for (let x = 24; x < w; x += 24) {
-        ctx.beginPath(); ctx.arc(x, y, 1.3, 0, Math.PI * 2); ctx.fill();
+        ctx.beginPath(); ctx.arc(x, y, 1.3 * lineScale, 0, Math.PI * 2); ctx.fill();
       }
       break;
     case 'cornell': {
@@ -114,9 +114,22 @@ export function drawPaper(ctx, w, h, template = 'lined', color = 'white') {
 // ---- items ----
 
 // Stroke width at a point, taking pen pressure into account.
+export const PEN_TYPES = [['fountain', 'Fountain'], ['ball', 'Ballpoint'], ['brush', 'Brush']];
+
 export function pressureWidth(item, p) {
   if (!item.pressure) return item.width;
-  return item.width * (0.25 + 1.1 * Math.pow(p, 0.8));
+  switch (item.pen) {
+    case 'ball': return item.width * (0.8 + 0.35 * p);
+    case 'brush': return item.width * (0.12 + 1.9 * Math.pow(p, 1.25));
+    default: return item.width * (0.25 + 1.1 * Math.pow(p, 0.8));
+  }
+}
+
+// Brush strokes taper at both ends even without pressure input.
+function taper(item, i, n) {
+  if (item.pen !== 'brush') return 1;
+  const k = Math.min(1, (i + 1) / 7, (n - i) / 7);
+  return 0.25 + 0.75 * k;
 }
 
 export function drawStroke(ctx, item) {
@@ -138,7 +151,7 @@ export function drawStroke(ctx, item) {
     ctx.beginPath();
     ctx.arc(pts[0][0], pts[0][1], pressureWidth(item, pts[0][2] ?? 0.5) / 2, 0, Math.PI * 2);
     ctx.fill();
-  } else if (!item.pressure) {
+  } else if (!item.pressure && item.pen !== 'brush') {
     ctx.lineWidth = item.width;
     ctx.beginPath();
     tracePath(ctx, pts);
@@ -148,8 +161,7 @@ export function drawStroke(ctx, item) {
     for (let i = 1; i < pts.length; i++) {
       const a = pts[i - 1], b = pts[i];
       const prev = i > 1 ? pts[i - 2] : a;
-      const next = i < pts.length - 1 ? pts[i + 1] : b;
-      ctx.lineWidth = pressureWidth(item, (a[2] + b[2]) / 2);
+      ctx.lineWidth = pressureWidth(item, (a[2] + b[2]) / 2) * taper(item, i, pts.length);
       ctx.beginPath();
       const m1x = (prev[0] + a[0]) / 2, m1y = (prev[1] + a[1]) / 2;
       const m2x = (a[0] + b[0]) / 2, m2y = (a[1] + b[1]) / 2;
@@ -157,7 +169,6 @@ export function drawStroke(ctx, item) {
       else { ctx.moveTo(m1x, m1y); ctx.quadraticCurveTo(a[0], a[1], m2x, m2y); }
       if (i === pts.length - 1) ctx.lineTo(b[0], b[1]);
       ctx.stroke();
-      void next;
     }
   }
   ctx.restore();
@@ -285,6 +296,39 @@ export function drawImageItem(ctx, item, bmp) {
   ctx.drawImage(bmp, a[0], a[1], b[0] - a[0], b[1] - a[1]);
 }
 
+export const TAPE_COLORS = ['#f4a6b8', '#9fd3f5', '#b9e4a8', '#ffd98a', '#c9b6f2', '#cfcfd4'];
+
+export function drawTape(ctx, item) {
+  const [a, b] = item.pts;
+  const ang = Math.atan2(b[1] - a[1], b[0] - a[0]);
+  const len = Math.hypot(b[0] - a[0], b[1] - a[1]);
+  const w = item.width;
+  ctx.save();
+  ctx.translate(a[0], a[1]);
+  ctx.rotate(ang);
+  ctx.beginPath();
+  // Torn, zig-zag ends like real washi tape.
+  const z = Math.max(3, w / 8);
+  ctx.moveTo(0, -w / 2);
+  ctx.lineTo(len, -w / 2);
+  for (let y = -w / 2, k = 0; y < w / 2; y += z, k++) ctx.lineTo(len + (k % 2 ? 0 : z * 0.8), Math.min(w / 2, y + z));
+  ctx.lineTo(0, w / 2);
+  for (let y = w / 2, k = 0; y > -w / 2; y -= z, k++) ctx.lineTo(k % 2 ? 0 : -z * 0.8, Math.max(-w / 2, y - z));
+  ctx.closePath();
+  if (item.revealed) {
+    ctx.globalAlpha = 0.22; ctx.fillStyle = item.color; ctx.fill();
+    ctx.globalAlpha = 0.8; ctx.setLineDash([4, 3]); ctx.strokeStyle = item.color; ctx.lineWidth = 1.2; ctx.stroke();
+  } else {
+    ctx.fillStyle = item.color; ctx.fill();
+    ctx.clip();
+    ctx.globalAlpha = 0.18; ctx.strokeStyle = '#fff'; ctx.lineWidth = w / 6;
+    ctx.beginPath();
+    for (let x = -w; x < len + w; x += w / 2.2) { ctx.moveTo(x, -w / 2); ctx.lineTo(x + w * 0.7, w / 2); }
+    ctx.stroke();
+  }
+  ctx.restore();
+}
+
 export function drawItem(ctx, item, images, opts = {}) {
   if (opts.alphaFor) {
     const al = opts.alphaFor(item);
@@ -296,6 +340,7 @@ export function drawItem(ctx, item, images, opts = {}) {
     case 'shape': drawShape(ctx, item); break;
     case 'image': drawImageItem(ctx, item, images.get(item.blob)); break;
     case 'text': if (!opts.skipText) drawText(ctx, item); break;
+    case 'tape': drawTape(ctx, opts.forExport ? { ...item, revealed: false } : item); break;
   }
   if (opts.alphaFor) ctx.restore();
 }

@@ -1,13 +1,14 @@
 // The note editor: page layout, input handling, tools, undo/redo and saving.
-import { db, uid, putBlob } from './db.js';
+import { db, uid, putBlob, getBlob } from './db.js';
 import {
   drawBackground, drawItem, drawStroke, drawShape, loadImage, itemBBox, hitItem, distToSeg,
   pointInPoly, transformItem, TEMPLATES, PAPER_COLORS, PAGE_SIZES, FONTS, textFont,
+  PEN_TYPES, TAPE_COLORS, drawTape, drawPaper,
 } from './render.js';
 import { recognize } from './shapes.js';
 import {
   icon, el, toast, menu, popover, closePopover, prompt, confirm, sheet, pickFile,
-  shareOrDownload, COLORS, HL_COLORS,
+  shareOrDownload, COLORS, HL_COLORS, fmtTime,
 } from './ui.js';
 import {
   settings, saveSettings, newPage, loadPages, buildSearchText, pdfToPages, imageToPage,
@@ -16,16 +17,41 @@ import {
 import { AudioPanel } from './audio.js';
 
 const MAX_PX = 8_000_000; // per-canvas pixel budget (iPad Safari canvas memory is limited)
-const DRAW_TOOLS = new Set(['pen', 'highlighter', 'eraser', 'lasso', 'shape', 'text', 'laser']);
+const DRAW_TOOLS = new Set(['pen', 'highlighter', 'eraser', 'lasso', 'shape', 'text', 'laser', 'tape']);
 
 const DEFAULT_TOOLS = {
-  pen: { color: '#1c1c1e', width: 2.4, pressure: true, colors: ['#1c1c1e', '#1f6feb', '#e5383b', '#2a9d4b'] },
-  highlighter: { color: '#ffe94d', width: 18, straight: false, colors: ['#ffe94d', '#9ef01a', '#5ce1e6', '#ff8fab'] },
-  eraser: { mode: 'stroke', size: 16 },
-  shape: { kind: 'auto', color: '#1c1c1e', width: 2.4, fill: null, dash: false },
-  text: { font: 'sans', size: 20, color: '#1c1c1e', bold: false },
-  laser: { color: '#ff2d55' },
+  pen: { color: '#1c1c1e', width: 2.4, pressure: true, pen: 'fountain', colors: ['#1c1c1e', '#1f6feb', '#e5383b'], sizes: [1.4, 2.4, 4.2] },
+  highlighter: { color: '#ffe94d', width: 18, straight: false, colors: ['#ffe94d', '#9ef01a', '#ff8fab'], sizes: [10, 18, 28] },
+  eraser: { mode: 'stroke', size: 16, sizes: [8, 16, 34] },
+  shape: { kind: 'auto', color: '#1c1c1e', width: 2.4, fill: null, dash: false, colors: ['#1c1c1e', '#1f6feb', '#e5383b'], sizes: [1.5, 2.5, 4.5] },
+  text: { font: 'sans', size: 20, color: '#1c1c1e', bold: false, colors: ['#1c1c1e', '#1f6feb', '#e5383b'], sizes: [14, 20, 32] },
+  laser: { color: '#ff2d55', colors: ['#ff2d55', '#0a84ff', '#34c759'] },
+  tape: { color: '#f4a6b8', width: 26, colors: ['#f4a6b8', '#9fd3f5', '#ffd98a'], sizes: [16, 26, 40] },
 };
+
+const EMOJI = '⭐️ ✅ ❌ ❗️ ❓ 💡 📌 📎 🔥 ✨ 💯 👍 👏 🙌 😀 😂 🥰 😎 🤔 😴 🎉 🎯 🏆 🚀 📚 📝 ✏️ 📐 🧪 🧬 🔬 🌍 🎵 ☕️ 🍎 🌸 🌈 ☀️ 🌙 ❤️ 💙 💚 💛 💜 🖤 ➡️ ⬅️ ⬆️ ⬇️ ↩️ 🔁 ⚠️ 🚫 ⏰ 📅 💬 🔑 🧠 💪'.split(' ');
+const STICKY = ['#fff59d', '#ffcc80', '#f8bbd0', '#b3e5fc', '#c5e1a5', '#d1c4e9'];
+
+function canvasBlob(w, h, draw) {
+  const c = document.createElement('canvas');
+  c.width = w; c.height = h;
+  draw(c.getContext('2d'));
+  return new Promise(r => c.toBlob(r, 'image/png'));
+}
+
+const emojiBlob = em => canvasBlob(256, 256, ctx => {
+  ctx.font = '200px "Apple Color Emoji", "Segoe UI Emoji", "Noto Color Emoji", sans-serif';
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  ctx.fillText(em, 128, 140);
+});
+
+const stickyBlob = color => canvasBlob(440, 440, ctx => {
+  ctx.shadowColor = 'rgba(0,0,0,.22)'; ctx.shadowBlur = 18; ctx.shadowOffsetY = 8;
+  ctx.fillStyle = color;
+  ctx.beginPath(); ctx.moveTo(20, 16); ctx.lineTo(420, 16); ctx.lineTo(420, 380); ctx.quadraticCurveTo(400, 420, 330, 420); ctx.lineTo(20, 420); ctx.closePath(); ctx.fill();
+  ctx.shadowColor = 'transparent';
+  ctx.fillStyle = 'rgba(0,0,0,.05)'; ctx.fillRect(20, 16, 400, 40);
+});
 
 export class Editor {
   constructor(app) {
@@ -54,12 +80,14 @@ export class Editor {
     this.sel = null;
     this.zoom = 1;
     this.recording = null;
+    this.horizontal = settings().scrollDir === 'horizontal';
     this.buildDom();
     this.audio = new AudioPanel(this);
     await this.audio.load();
     this.layout();
     this.updateUndoButtons();
-    this.selectTool(this.tool);
+    this.selectTool(this.tool === 'laser' ? 'pen' : this.tool);
+    this.renderTabs();
   }
 
   async close() {
@@ -76,6 +104,7 @@ export class Editor {
     } catch (e) { console.warn(e); }
     this.io && this.io.disconnect();
     this.root.innerHTML = '';
+    this.root.classList.remove('presenting');
     this.pageEls = new Map();
     this.note = null;
   }
@@ -83,43 +112,50 @@ export class Editor {
   // ---------- DOM ----------
   buildDom() {
     this.root.innerHTML = '';
-    const tb = (name, title, onclick, cls = '') => el('button', { class: 'icon-btn ' + cls, title, 'aria-label': title, html: icon[name], onclick, 'data-tool': name });
-    this.titleEl = el('button', { class: 'ed-title', onclick: () => this.rename() }, this.note.title);
-    this.undoBtn = tb('undo', 'Undo', () => this.undo());
-    this.redoBtn = tb('redo', 'Redo', () => this.redo());
+    const ib = (name, title, onclick, cls = '') => el('button', { class: 'icon-btn ' + cls, title, 'aria-label': title, html: icon[name], onclick });
+    this.undoBtn = ib('undo', 'Undo', () => this.undo());
+    this.redoBtn = ib('redo', 'Redo', () => this.redo());
     this.toolBtns = {};
     const toolDefs = [['pen', 'pen', 'Pen'], ['highlighter', 'highlighter', 'Highlighter'], ['eraser', 'eraser', 'Eraser'],
-      ['lasso', 'lasso', 'Lasso'], ['text', 'text', 'Text'], ['shape', 'shapes', 'Shapes'], ['laser', 'laser', 'Laser pointer'], ['hand', 'hand', 'Scroll / select text']];
+      ['lasso', 'lasso', 'Lasso'], ['shape', 'shapes', 'Shapes'], ['text', 'text', 'Text'], ['tape', 'tape', 'Tape'],
+      ['laser', 'laser', 'Laser pointer'], ['hand', 'hand', 'Scroll']];
     const tools = el('div', { class: 'tool-group' });
     for (const [t, ic, title] of toolDefs) {
       const b = el('button', { class: 'icon-btn tool', title, 'aria-label': title, html: icon[ic], onclick: e => this.onToolButton(t, e.currentTarget) });
       this.toolBtns[t] = b;
       tools.append(b);
+      if (t === 'tape') tools.append(
+        el('button', { class: 'icon-btn tool', title: 'Insert image', html: icon.image, onclick: () => this.insertImage() }),
+        el('button', { class: 'icon-btn tool', title: 'Stickers & elements', html: icon.sticker, onclick: e => this.stickerPicker(e.currentTarget) }));
     }
-    tools.append(el('button', { class: 'icon-btn', title: 'Insert image', html: icon.image, onclick: () => this.insertImage() }));
     this.swatches = el('div', { class: 'swatches' });
+    this.sizesEl = el('div', { class: 'sizes' });
     this.micBtn = el('button', { class: 'icon-btn mic', title: 'Record audio', html: icon.mic, onclick: () => this.audio.toggleRecord() });
     this.recTime = el('span', { class: 'rec-time' });
-    const header = el('header', { class: 'ed-bar' },
-      el('div', { class: 'ed-left' },
-        el('button', { class: 'icon-btn', title: 'Library', html: icon.back, onclick: () => this.app.showLibrary() }),
-        el('button', { class: 'icon-btn', title: 'Pages', html: icon.pages, onclick: () => this.toggleThumbs() }),
-        this.titleEl),
-      el('div', { class: 'ed-center' }, this.undoBtn, this.redoBtn, el('span', { class: 'bar-sep' }), tools, el('span', { class: 'bar-sep' }), this.swatches),
-      el('div', { class: 'ed-right' },
+    this.tabsEl = el('div', { class: 'tabs' });
+    const nav = el('header', { class: 'ed-nav' },
+      el('div', { class: 'ed-nav-left' },
+        ib('grid', 'Library', () => this.app.showLibrary()),
+        ib('pages', 'Pages & outline', () => this.toggleThumbs()),
+        ib('search', 'Search in note', () => this.toggleSearch())),
+      this.tabsEl,
+      el('div', { class: 'ed-nav-right' },
         this.recTime, this.micBtn,
-        el('button', { class: 'icon-btn', title: 'Search in note', html: icon.search, onclick: () => this.toggleSearch() }),
-        el('button', { class: 'icon-btn', title: 'Share / export', html: icon.share, onclick: e => this.shareMenu(e.currentTarget) }),
-        el('button', { class: 'icon-btn', title: 'More', html: icon.more, onclick: e => this.moreMenu(e.currentTarget) })));
+        ib('present', 'Present', () => this.togglePresent()),
+        ib('share', 'Share & export', e => this.shareMenu(e.currentTarget)),
+        ib('more', 'More', e => this.moreMenu(e.currentTarget))));
+    const toolbar = el('div', { class: 'ed-tools' },
+      this.undoBtn, this.redoBtn, el('span', { class: 'bar-sep' }), tools, el('span', { class: 'bar-sep' }), this.swatches, this.sizesEl);
 
-    this.pagesEl = el('div', { class: 'pages' });
-    this.scroller = el('div', { class: 'scroller' }, this.pagesEl);
-    this.thumbsEl = el('aside', { class: 'thumbs hidden' });
+    this.pagesEl = el('div', { class: 'pages' + (this.horizontal ? ' horizontal' : '') });
+    if (this.horizontal) Object.assign(this.pagesEl.style, { flexDirection: 'row', alignItems: 'center', minHeight: '100%', padding: '16px 40px' });
+    this.scroller = el('div', { class: 'scroller' + (this.horizontal ? ' horizontal' : '') }, this.pagesEl);
+    this.thumbsEl = el('aside', { class: 'side-panel hidden' });
     this.searchEl = el('aside', { class: 'search-panel hidden' });
     this.pageNum = el('div', { class: 'page-num' });
     this.audioBar = el('div', { class: 'audio-bar hidden' });
-    const body = el('div', { class: 'ed-body' }, this.thumbsEl, el('div', { class: 'scroll-wrap' }, this.scroller, this.pageNum), this.searchEl);
-    this.root.append(header, body, this.audioBar);
+    const body = el('div', { class: 'ed-body' }, this.thumbsEl, el('div', { class: 'scroll-wrap' }, this.scroller, this.pageNum, this.audioBar), this.searchEl);
+    this.root.append(nav, toolbar, body);
 
     this.live = el('canvas', { class: 'live' });
     this.liveCtx = this.live.getContext('2d');
@@ -144,8 +180,26 @@ export class Editor {
         if (!pe) continue;
         if (en.isIntersecting) this.mount(pe); else this.unmount(pe);
       }
-    }, { root: this.scroller, rootMargin: '60% 0px' });
+    }, { root: this.scroller, rootMargin: this.horizontal ? '0px 60%' : '60% 0px' });
     this.rebuildPages();
+  }
+
+  async renderTabs() {
+    if (!this.tabsEl) return;
+    const notes = await this.app.tabNotes();
+    this.tabsEl.innerHTML = '';
+    for (const n of notes) {
+      const active = this.note && n.id === this.note.id;
+      const subj = this.app.subjects?.find(s => s.id === n.subjectId);
+      const tab = el('div', { class: 'tab' + (active ? ' active' : ''), title: n.title, onclick: () => { if (active) this.rename(); else this.app.openNote(n, true); } },
+        subj ? el('span', { class: 'dot', style: { background: subj.color } }) : null,
+        el('span', { class: 'tab-title' }, n.title),
+        el('button', { class: 'tab-x', html: icon.close, title: 'Close tab', onclick: e => { e.stopPropagation(); this.app.closeTab(n.id); } }));
+      if (active) this.titleEl = tab.querySelector('.tab-title');
+      this.tabsEl.append(tab);
+    }
+    const act = this.tabsEl.querySelector('.tab.active');
+    if (act) act.scrollIntoView({ inline: 'nearest', block: 'nearest' });
   }
 
   rebuildPages() {
@@ -155,7 +209,8 @@ export class Editor {
     this.pages.forEach((p, i) => {
       const canvas = el('canvas', { class: 'page-canvas' });
       const textLayer = el('div', { class: 'text-layer' });
-      const node = el('div', { class: 'page', 'data-id': p.id }, canvas, textLayer, el('div', { class: 'page-label' }, String(i + 1)));
+      const node = el('div', { class: 'page', 'data-id': p.id }, canvas, textLayer, el('div', { class: 'page-label' }, String(i + 1)),
+        p.bookmark ? el('div', { class: 'page-bm', title: p.bookmarkTitle || 'Bookmarked' }) : null);
       const pe = { page: p, el: node, canvas, textLayer, mounted: false, token: 0 };
       this.pageEls.set(p.id, pe);
       this.pagesEl.append(node);
@@ -173,6 +228,11 @@ export class Editor {
     const maxW = Math.max(...this.pages.map(p => p.w), 816);
     const avail = this.scroller.clientWidth || innerWidth;
     this.fit = Math.min(1.6, Math.max(0.3, (avail - 32) / maxW));
+    if (this.horizontal) {
+      // Page-by-page mode: fit the whole page on screen.
+      const maxH = Math.max(...this.pages.map(p => p.h), 1056);
+      this.fit = Math.max(0.2, Math.min((avail - 80) / maxW, ((this.scroller.clientHeight || innerHeight) - 32) / maxH));
+    }
     const s = this.scale;
     this.pagesEl.style.gap = Math.round(18 * Math.min(1, s)) + 'px';
     for (const pe of this.pageEls.values()) {
@@ -292,70 +352,101 @@ export class Editor {
 
   colorTarget() {
     const t = this.tool;
-    if (t === 'pen' || t === 'highlighter' || t === 'shape' || t === 'text' || t === 'laser') return this.tools[t];
-    if (t === 'lasso' && this.sel) return null;
-    return null;
+    if (t === 'lasso' || t === 'eraser' || t === 'hand') return null;
+    return this.tools[t];
   }
 
+  // Quick colors and three size presets, like the favorites bar in pro note apps.
   renderSwatches() {
     this.swatches.innerHTML = '';
+    this.sizesEl.innerHTML = '';
+    for (const t of ['pen', 'highlighter', 'tape']) if (this.toolBtns[t]) this.toolBtns[t].style.setProperty('--tip', this.tools[t].color);
     const target = this.colorTarget();
-    if (this.tool === 'lasso' && this.sel) return;
-    if (!target) return;
-    const quick = target.colors || (this.tool === 'highlighter' ? HL_COLORS.slice(0, 4) : ['#1c1c1e', '#1f6feb', '#e5383b', '#2a9d4b']);
-    for (const c of quick) {
-      this.swatches.append(el('button', {
-        class: 'swatch' + (c === target.color ? ' active' : ''), style: { '--c': c }, title: c,
-        onclick: () => { target.color = c; this.renderSwatches(); this.persistTools(); this.applyToEditingText(); },
-      }));
+    if (target && target.colors) {
+      for (const c of target.colors) {
+        this.swatches.append(el('button', {
+          class: 'swatch' + (c === target.color ? ' active' : ''), style: { '--c': c }, title: 'Color',
+          onclick: e => {
+            if (target.color === c) { this.toolOptions(this.tool, e.currentTarget); return; }
+            target.color = c; this.renderSwatches(); this.persistTools(); this.applyToEditingText();
+          },
+        }));
+      }
     }
-    this.swatches.append(el('button', { class: 'icon-btn small', title: 'Tool options', html: icon.more, onclick: e => this.toolOptions(this.tool, e.currentTarget) }));
+    const o = this.tools[this.tool];
+    if (o && o.sizes) {
+      const key = this.tool === 'eraser' ? 'size' : this.tool === 'text' ? 'size' : 'width';
+      const max = Math.max(...o.sizes);
+      o.sizes.forEach((v, i) => {
+        const d = Math.round(5 + (v / max) * 13);
+        this.sizesEl.append(el('button', {
+          class: 'size-dot' + (Math.abs(o[key] - v) < 0.01 ? ' active' : ''), title: 'Size ' + (i + 1),
+          onclick: e => {
+            if (Math.abs(o[key] - v) < 0.01) { this.toolOptions(this.tool, e.currentTarget); return; }
+            o[key] = v; this.renderSwatches(); this.persistTools(); this.applyToEditingText();
+          },
+        }, el('i', { style: { width: d + 'px', height: d + 'px' } })));
+      });
+    }
   }
 
   toolOptions(t, anchor) {
     const o = this.tools[t];
+    if (!o) return;
     const box = el('div', { class: 'tool-opts' });
+    const remember = c => { if (o.colors && !o.colors.includes(c)) { o.colors.pop(); o.colors.unshift(c); } };
     const colorGrid = (palette, key = 'color') => {
       const g = el('div', { class: 'color-grid' });
       for (const c of palette) g.append(el('button', {
         class: 'swatch' + (c === o[key] ? ' active' : ''), style: { '--c': c },
         onclick: () => {
           o[key] = c;
-          if (o.colors && !o.colors.includes(c)) { o.colors.pop(); o.colors.unshift(c); }
+          if (key === 'color') remember(c);
           this.persistTools(); this.renderSwatches(); this.applyToEditingText(); this.toolOptions(t, anchor);
         },
       }));
       const custom = el('input', { type: 'color', value: o[key] || '#000000', class: 'color-input', title: 'Custom color' });
-      custom.oninput = () => { o[key] = custom.value; if (o.colors && !o.colors.includes(custom.value)) { o.colors.pop(); o.colors.unshift(custom.value); } this.persistTools(); this.renderSwatches(); this.applyToEditingText(); };
+      custom.oninput = () => { o[key] = custom.value; this.persistTools(); this.renderSwatches(); this.applyToEditingText(); };
+      custom.onchange = () => { if (key === 'color') remember(custom.value); this.persistTools(); this.renderSwatches(); };
       g.append(custom);
       return g;
     };
+    const sizeKey = t === 'eraser' || t === 'text' ? 'size' : 'width';
     const slider = (label, key, min, max, step) => {
-      const val = el('span', { class: 'slider-val' }, String(o[key]));
+      const val = el('span', { class: 'slider-val' }, String(+(+o[key]).toFixed(1)));
       const input = el('input', { type: 'range', min, max, step, value: o[key] });
-      input.oninput = () => { o[key] = +input.value; val.textContent = input.value; this.persistTools(); this.applyToEditingText(); };
+      input.oninput = () => {
+        o[key] = +input.value; val.textContent = input.value;
+        // Editing the size updates the selected preset, so presets are customizable.
+        if (key === sizeKey && o.sizes && this.activePreset != null) o.sizes[this.activePreset] = +input.value;
+        this.persistTools(); this.applyToEditingText(); this.renderSwatches();
+      };
       return el('label', { class: 'slider' }, el('span', {}, label), input, val);
     };
-    const toggle = (label, key) => {
-      const input = el('input', { type: 'checkbox' }); input.checked = !!o[key];
-      input.onchange = () => { o[key] = input.checked; this.persistTools(); };
-      return el('label', { class: 'toggle' }, input, el('span', {}, label));
+    this.activePreset = o.sizes ? o.sizes.findIndex(v => Math.abs(v - o[sizeKey]) < 0.01) : null;
+    if (this.activePreset < 0) this.activePreset = null;
+    const toggle = (label, key, target = o) => {
+      const input = el('input', { type: 'checkbox' }); input.checked = !!target[key];
+      input.onchange = () => { target[key] = input.checked; this.persistTools(); this.applyToEditingText(); };
+      return el('label', { class: 'toggle' }, el('span', {}, label), input);
     };
     const seg = (key, options) => el('div', { class: 'seg' }, options.map(([v, label]) => el('button', {
       class: o[key] === v ? 'on' : '', onclick: () => { o[key] = v; this.persistTools(); this.applyToEditingText(); this.toolOptions(t, anchor); },
     }, label)));
     switch (t) {
-      case 'pen':
-        box.append(el('h4', {}, 'Pen'), colorGrid(COLORS), slider('Size', 'width', 0.5, 14, 0.1), toggle('Pressure sensitivity (Apple Pencil)', 'pressure'));
-        { const inp = el('input', { type: 'checkbox' }); inp.checked = this.shapeHold;
-          inp.onchange = () => { this.shapeHold = inp.checked; this.persistTools(); };
-          box.append(el('label', { class: 'toggle' }, inp, el('span', {}, 'Draw and hold to snap shapes'))); }
+      case 'pen': {
+        box.append(el('h4', {}, 'Pen'), seg('pen', PEN_TYPES), colorGrid(COLORS), slider('Size', 'width', 0.5, 14, 0.1), toggle('Pressure sensitivity', 'pressure'));
+        const holder = { shapeHold: this.shapeHold };
+        const tg = toggle('Draw and hold to snap shapes', 'shapeHold', holder);
+        tg.querySelector('input').addEventListener('change', () => { this.shapeHold = holder.shapeHold; this.persistTools(); });
+        box.append(tg);
         break;
+      }
       case 'highlighter':
         box.append(el('h4', {}, 'Highlighter'), colorGrid(HL_COLORS.concat(COLORS.slice(3, 9))), slider('Size', 'width', 6, 40, 1), toggle('Straight lines', 'straight'));
         break;
       case 'eraser':
-        box.append(el('h4', {}, 'Eraser'), seg('mode', [['stroke', 'Whole stroke'], ['partial', 'Partial']]), slider('Size', 'size', 4, 60, 1));
+        box.append(el('h4', {}, 'Eraser'), seg('mode', [['stroke', 'Whole stroke'], ['partial', 'Precise']]), slider('Size', 'size', 4, 60, 1));
         break;
       case 'shape':
         box.append(el('h4', {}, 'Shapes'), seg('kind', [['auto', 'Freehand'], ['line', 'Line'], ['arrow', 'Arrow'], ['rect', 'Rect'], ['ellipse', 'Oval'], ['triangle', 'Tri']]),
@@ -366,10 +457,15 @@ export class Editor {
         break;
       case 'text':
         box.append(el('h4', {}, 'Text'), seg('font', Object.keys(FONTS).map(f => [f, f[0].toUpperCase() + f.slice(1)])), colorGrid(COLORS), slider('Size', 'size', 10, 72, 1), toggle('Bold', 'bold'));
-        box.lastChild.querySelector('input').addEventListener('change', () => this.applyToEditingText());
         break;
       case 'laser':
         box.append(el('h4', {}, 'Laser pointer'), colorGrid(['#ff2d55', '#ff9500', '#34c759', '#0a84ff', '#bf5af2']));
+        break;
+      case 'tape':
+        box.append(el('h4', {}, 'Tape'), el('p', { class: 'muted', style: { margin: '0 0 10px', fontSize: '13px' } }, 'Drag to cover answers. Tap tape to peek underneath; tap again to cover.'),
+          colorGrid(TAPE_COLORS), slider('Width', 'width', 10, 60, 1),
+          el('button', { class: 'btn small', onclick: () => { this.setAllTape(false); closePopover(); } }, 'Reveal all on page'), ' ',
+          el('button', { class: 'btn small', onclick: () => { this.setAllTape(true); closePopover(); } }, 'Cover all'));
         break;
       default: return;
     }
@@ -475,7 +571,7 @@ export class Editor {
     const g = this.tapGesture;
     if (g && e.touches.length === 0) {
       this.tapGesture = null;
-      if (!g.moved && performance.now() - g.t < 300) {
+      if (!g.moved && performance.now() - g.t < 300 && settings().tapUndo !== false) {
         if (g.n === 2) this.undo();
         else if (g.n === 3) this.redo();
       }
@@ -546,9 +642,10 @@ export class Editor {
   }
 
   currentPageIndex() {
-    const mid = this.scroller.scrollTop + this.scroller.clientHeight / 3;
+    const h = this.horizontal;
+    const mid = h ? this.scroller.scrollLeft + this.scroller.clientWidth / 2 : this.scroller.scrollTop + this.scroller.clientHeight / 3;
     let idx = 0;
-    this.pages.forEach((p, i) => { const pe = this.pageEls.get(p.id); if (pe && pe.el.offsetTop <= mid) idx = i; });
+    this.pages.forEach((p, i) => { const pe = this.pageEls.get(p.id); if (pe && (h ? pe.el.offsetLeft : pe.el.offsetTop) <= mid) idx = i; });
     return idx;
   }
 
@@ -588,6 +685,7 @@ export class Editor {
       pressure: tool === 'pen' && o.pressure && e.pointerType === 'pen',
       pts: [[pt[0], pt[1], this.pressureOf(e)]],
     };
+    if (tool === 'pen' && o.pen && o.pen !== 'fountain') item.pen = o.pen;
     if (tool === 'highlighter') item.flat = true;
     this.audio.tag(item);
     a.item = item;
@@ -793,6 +891,28 @@ export class Editor {
     step();
   }
 
+  // ---------- tape ----------
+  down_tape(a, pt) {
+    const o = this.tools.tape;
+    this.attachLive(a.pe);
+    a.shape = { id: uid(), type: 'tape', pts: [pt, pt], width: o.width, color: o.color };
+    this.drawLive = () => { this.clearLive(); if (a.moved) drawTape(this.liveCtx, a.shape); };
+  }
+
+  move_tape(a, pt) { a.shape.pts = [a.start, pt]; }
+
+  up_tape(a, pt) {
+    this.clearLive();
+    this.drawLive = null;
+    const page = a.pe.page;
+    if (!a.moved || Math.hypot(pt[0] - a.start[0], pt[1] - a.start[1]) < 8) {
+      const hit = [...page.items].reverse().find(it => it.type === 'tape' && hitItem(it, pt[0], pt[1], 4));
+      if (hit) { hit.revealed = !hit.revealed; this.markDirty(page); this.rerender(a.pe); }
+      return;
+    }
+    this.addItems(a.pe, [a.shape]);
+  }
+
   // ---------- text ----------
   down_text(a) { /* handled on up so taps can focus */ }
 
@@ -961,7 +1081,9 @@ export class Editor {
       n === 1 && items[0].type === 'text' ? btn('Edit', () => { const it = items[0]; const pe = this.sel.pe; this.selectTool('text'); this.startTextEdit(pe, it); }) : null,
       btn('Front', () => this.reorderSel(true)),
       btn('Back', () => this.reorderSel(false)),
-      this.pages.length > 1 ? btn('Move to page…', () => this.moveSelToPage()) : null,
+      this.pages.length > 1 ? btn('Move to Page', () => this.moveSelToPage()) : null,
+      btn('Flashcard', () => this.selToFlashcard()),
+      btn('Save Element', () => this.saveSelAsElement()),
       btn('Delete', () => this.deleteSel(), 'danger'));
     bar.addEventListener('pointerdown', e => e.stopPropagation());
     this.selBox.append(bar);
@@ -1011,6 +1133,34 @@ export class Editor {
     this.showSelection();
     this.rerender(a.pe);
     this.pushUndo({ kind: 'items', pageId: a.pe.page.id, before: a.before, after: structuredClone(a.pe.page.items) }, a.pe.page);
+  }
+
+  // Render the selected items to a transparent PNG, cropped to the selection.
+  async selectionBlob() {
+    const items = this.selItems();
+    const [x1, y1, x2, y2] = this.sel.bbox;
+    const sc = 2;
+    const c = document.createElement('canvas');
+    c.width = Math.max(1, Math.round((x2 - x1) * sc)); c.height = Math.max(1, Math.round((y2 - y1) * sc));
+    const ctx = c.getContext('2d');
+    ctx.setTransform(sc, 0, 0, sc, -x1 * sc, -y1 * sc);
+    const images = new Map();
+    await Promise.all(items.filter(i => i.type === 'image').map(async i => images.set(i.blob, await loadImage(i.blob))));
+    for (const it of items) drawItem(ctx, it, images, { forExport: true });
+    const blob = await new Promise(r => c.toBlob(r, 'image/png'));
+    c.width = c.height = 0;
+    return blob;
+  }
+
+  async saveSelAsElement() {
+    const blob = await this.selectionBlob();
+    await db.put('elements', { id: uid(), blob: await putBlob(blob), created: Date.now() });
+    toast('Saved to My Elements');
+  }
+
+  async selToFlashcard() {
+    const blob = await this.selectionBlob();
+    await this.app.study.cardFromImage(blob, this.note);
   }
 
   copySel() {
@@ -1187,7 +1337,7 @@ export class Editor {
     if (gone.length) await db.delMany('pages', gone);
     this.note.pageIds = this.pages.map(p => p.id);
     this.note.modified = Date.now();
-    this.note.searchText = buildSearchText(this.note, this.pages);
+    this.note.searchText = buildSearchText(this.note, this.pages) + '\n' + (this.audio ? this.audio.transcriptText().toLowerCase() : '');
     await db.put('notes', this.note);
   }
 
@@ -1232,7 +1382,8 @@ export class Editor {
     const p = this.pages[i];
     const pe = p && this.pageEls.get(p.id);
     if (!pe) return;
-    this.scroller.scrollTo({ top: pe.el.offsetTop - 12, behavior: smooth ? 'smooth' : 'auto' });
+    if (this.horizontal) this.scroller.scrollTo({ left: pe.el.offsetLeft - (this.scroller.clientWidth - pe.el.offsetWidth) / 2, behavior: smooth ? 'smooth' : 'auto' });
+    else this.scroller.scrollTo({ top: pe.el.offsetTop - 12, behavior: smooth ? 'smooth' : 'auto' });
   }
 
   deletePage(i) {
@@ -1257,11 +1408,15 @@ export class Editor {
     this.recordPages(() => { const [p] = this.pages.splice(i, 1); this.pages.splice(j, 0, p); });
   }
 
-  toggleBookmark(i) {
+  async toggleBookmark(i) {
     const p = this.pages[i];
-    p.bookmark = !p.bookmark;
+    if (!p.bookmark) {
+      const t = await prompt('Bookmark title', p.bookmarkTitle || firstText(p) || `Page ${i + 1}`, { ok: 'Bookmark' });
+      if (t == null) return;
+      p.bookmark = true; p.bookmarkTitle = t;
+    } else p.bookmark = false;
     this.markDirty(p);
-    this.renderThumbs();
+    this.rebuildPages();
   }
 
   toggleThumbs() {
@@ -1273,19 +1428,30 @@ export class Editor {
   renderThumbs() {
     const box = this.thumbsEl;
     box.innerHTML = '';
-    const onlyBm = this.thumbFilter === 'bookmarks';
-    box.append(el('div', { class: 'thumbs-head' },
-      el('div', { class: 'seg small' },
-        el('button', { class: onlyBm ? '' : 'on', onclick: () => { this.thumbFilter = 'all'; this.renderThumbs(); } }, 'All pages'),
-        el('button', { class: onlyBm ? 'on' : '', onclick: () => { this.thumbFilter = 'bookmarks'; this.renderThumbs(); } }, 'Bookmarks'))));
+    const outline = this.thumbFilter === 'outline';
+    box.append(el('div', { class: 'panel-head' },
+      el('div', { class: 'seg small', style: { margin: 0 } },
+        el('button', { class: outline ? '' : 'on', onclick: () => { this.thumbFilter = 'all'; this.renderThumbs(); } }, 'Pages'),
+        el('button', { class: outline ? 'on' : '', onclick: () => { this.thumbFilter = 'outline'; this.renderThumbs(); } }, 'Outline'))));
+    this.thumbCanvases = new Map();
+    if (outline) {
+      const list = el('div', { class: 'outline-list' });
+      this.pages.forEach((p, i) => {
+        if (!p.bookmark) return;
+        list.append(el('button', { class: 'outline-row', onclick: () => this.scrollToPage(i) },
+          el('span', { class: 'bm-icon', html: icon.bookmark }), el('span', {}, p.bookmarkTitle || `Page ${i + 1}`), el('span', { class: 'ol-page' }, String(i + 1))));
+      });
+      if (!list.children.length) list.append(el('p', { class: 'muted pad', style: { fontSize: '13.5px' } }, 'Bookmark pages from the Pages tab (… menu) to build an outline of this note.'));
+      box.append(list);
+      return;
+    }
     const list = el('div', { class: 'thumb-list' });
     box.append(list);
-    this.thumbCanvases = new Map();
+    const cur = this.currentPageIndex();
     this.pages.forEach((p, i) => {
-      if (onlyBm && !p.bookmark) return;
       const c = el('canvas', { class: 'thumb-canvas' });
       this.thumbCanvases.set(p.id, c);
-      const item = el('div', { class: 'thumb' + (p.bookmark ? ' bm' : '') },
+      const item = el('div', { class: 'thumb' + (p.bookmark ? ' bm' : '') + (i === cur ? ' current' : '') },
         el('button', { class: 'thumb-img', onclick: () => this.scrollToPage(i) }, c),
         el('div', { class: 'thumb-foot' },
           el('span', {}, String(i + 1)),
@@ -1294,8 +1460,7 @@ export class Editor {
       list.append(item);
       this.drawThumb(p, c);
     });
-    if (onlyBm && !list.children.length) list.append(el('p', { class: 'muted pad' }, 'No bookmarked pages yet. Use a page\'s … menu to bookmark it.'));
-    list.append(el('button', { class: 'btn block', onclick: () => this.addPage(this.pages.length) }, '+ Add page'));
+    list.append(el('button', { class: 'btn block', onclick: () => this.addPage(this.pages.length) }, '+ Add Page'));
   }
 
   async drawThumb(p, c) {
@@ -1335,6 +1500,7 @@ export class Editor {
   // ---------- search ----------
   toggleSearch() {
     const box = this.searchEl;
+    if (box.classList.contains('transcript-panel')) { box.classList.remove('transcript-panel'); box.classList.add('hidden'); }
     box.classList.toggle('hidden');
     if (box.classList.contains('hidden')) { setTimeout(() => this.layout(), 20); return; }
     box.innerHTML = '';
@@ -1362,7 +1528,15 @@ export class Editor {
           }
         }
       });
-      if (!count) results.append(el('p', { class: 'muted pad' }, 'No matches. Search covers typed text and imported PDF text; handwriting is not searchable.'));
+      for (const r of this.audio.recs) for (const seg of r.transcript || []) {
+        const t = seg.text, i0 = t.toLowerCase().indexOf(q);
+        if (i0 < 0 || count >= 200) continue;
+        count++;
+        results.append(el('button', { class: 'search-hit', onclick: () => this.audio.seekTo(r, seg.t) },
+          el('span', { class: 'hit-page' }, `${r.name} · ${fmtTime(seg.t / 1000)}`),
+          el('span', {}, t.slice(0, i0), el('mark', {}, t.slice(i0, i0 + q.length)), t.slice(i0 + q.length))));
+      }
+      if (!count) results.append(el('p', { class: 'muted pad' }, 'No matches. Search covers typed text, PDF text and audio transcripts; handwriting is not searchable.'));
     };
     input.addEventListener('input', run);
     box.append(el('div', { class: 'search-head' }, input, el('button', { class: 'icon-btn', html: icon.close, onclick: () => this.toggleSearch() })), results);
@@ -1374,9 +1548,9 @@ export class Editor {
     const v = await prompt('Rename note', this.note.title);
     if (!v) return;
     this.note.title = v;
-    this.titleEl.textContent = v;
     this.noteDirty = true;
-    this.flush();
+    await this.flush();
+    this.renderTabs();
   }
 
   shareMenu(anchor) {
@@ -1412,18 +1586,58 @@ export class Editor {
 
   moreMenu(anchor) {
     menu(anchor, [
-      { label: 'Paper & templates…', icon: 'paper', action: () => this.paperSheet() },
-      { label: 'Add blank page', icon: 'plus', action: () => this.addPage(this.currentPageIndex() + 1) },
-      { label: 'Insert PDF pages…', icon: 'import', action: () => this.insertPdf() },
-      { label: 'Insert photo as page…', icon: 'image', action: () => this.insertImagePage() },
-      { label: 'Recordings…', icon: 'mic', action: () => this.audio.showBar(true) },
+      { label: 'Paper & Templates…', icon: 'paper', action: () => this.paperSheet() },
+      { label: 'Add Page', icon: 'plus', action: () => this.addPage(this.currentPageIndex() + 1) },
+      { label: 'Insert PDF Pages…', icon: 'import', action: () => this.insertPdf() },
+      { label: 'Insert Photo as Page…', icon: 'image', action: () => this.insertImagePage() },
+      { label: 'Bookmark This Page', icon: 'bookmark', checked: !!this.pages[this.currentPageIndex()]?.bookmark, action: () => this.toggleBookmark(this.currentPageIndex()) },
       '-',
-      { label: 'Draw with Apple Pencil only', icon: 'pencil', checked: this.pencilOnly, action: () => { this.pencilOnly = !this.pencilOnly; saveSettings({ pencilAuto: true }); this.persistTools(); this.applyTouchAction(); toast(this.pencilOnly ? 'Fingers scroll, Pencil draws' : 'Fingers draw too (two fingers scroll)'); } },
-      { label: 'Draw and hold to snap shapes', icon: 'shapes', checked: this.shapeHold, action: () => { this.shapeHold = !this.shapeHold; this.persistTools(); } },
-      { label: 'Zoom to fit width', icon: 'zoom', action: () => this.setZoom(1) },
-      { label: 'Rename note', icon: 'text', action: () => this.rename() },
-      { label: 'Gestures & tips', icon: 'hand', action: () => this.app.showHelp() },
+      { label: 'Recordings & Transcript', icon: 'mic', action: () => this.audio.showBar(true) },
+      { label: 'Make Flashcard…', icon: 'cards', action: () => this.app.study.cardFromText(this.note) },
+      { label: 'Present', icon: 'present', action: () => this.togglePresent() },
+      '-',
+      { label: 'Draw with Apple Pencil Only', icon: 'pencil', checked: this.pencilOnly, action: () => { this.pencilOnly = !this.pencilOnly; saveSettings({ pencilAuto: true }); this.persistTools(); this.applyTouchAction(); toast(this.pencilOnly ? 'Fingers scroll, Pencil draws' : 'Fingers draw too (two fingers scroll)'); } },
+      { label: this.horizontal ? 'Scroll Pages Vertically' : 'Scroll Pages Horizontally', icon: 'sort', action: () => { saveSettings({ scrollDir: this.horizontal ? 'vertical' : 'horizontal' }); this.reopen(); } },
+      { label: 'Zoom to Fit', icon: 'zoom', action: () => this.setZoom(1) },
+      { label: 'Rename', icon: 'text', action: () => this.rename() },
+      { label: 'Tips & Gestures', icon: 'hand', action: () => this.app.showHelp() },
     ]);
+  }
+
+  async reopen() {
+    const n = this.note;
+    await this.close();
+    await this.open(n);
+  }
+
+  togglePresent() {
+    const on = !this.root.classList.contains('presenting');
+    this.root.classList.toggle('presenting', on);
+    this.presentBar && this.presentBar.remove();
+    this.presentBar = null;
+    if (on) {
+      this.prePresentTool = this.tool;
+      this.selectTool('laser');
+      const b = (ic, t, title) => el('button', { class: 'icon-btn' + (this.tool === t ? ' on' : ''), title, html: icon[ic], onclick: () => { this.selectTool(t); this.togglePresentBar(); } });
+      this.togglePresentBar = () => {
+        this.presentBar && this.presentBar.remove();
+        this.presentBar = el('div', { class: 'present-exit' }, b('laser', 'laser', 'Laser'), b('pen', 'pen', 'Pen'), b('hand', 'hand', 'Scroll'),
+          el('button', { class: 'icon-btn', title: 'Exit presentation', html: icon.close, onclick: () => this.togglePresent() }));
+        this.root.querySelector('.scroll-wrap').append(this.presentBar);
+      };
+      this.togglePresentBar();
+      toast('Presenting: laser pointer is on');
+    } else if (this.prePresentTool) this.selectTool(this.prePresentTool);
+    setTimeout(() => this.layout(), 30);
+  }
+
+  setAllTape(covered) {
+    const pe = this.pageEls.get(this.pages[this.currentPageIndex()].id);
+    let n = 0;
+    for (const it of pe.page.items) if (it.type === 'tape') { it.revealed = !covered; n++; }
+    if (!n) { toast('No tape on this page'); return; }
+    this.markDirty(pe.page);
+    this.rerender(pe);
   }
 
   paperSheet(pageIndex = null) {
@@ -1436,7 +1650,7 @@ export class Editor {
       for (const [k, label] of TEMPLATES) {
         const c = el('canvas', { width: 136, height: 176 });
         const ctx = c.getContext('2d'); ctx.scale(136 / 816, 176 / 1056);
-        import('./render.js').then(m => m.drawPaper(ctx, 816, 1056, k, cur.paper));
+        drawPaper(ctx, 816, 1056, k, cur.paper, 3.5);
         grid.append(el('button', { class: 'tpl' + (cur.template === k ? ' on' : ''), onclick: () => { cur.template = k; render(); } }, c, el('span', {}, label)));
       }
       const colors = el('div', { class: 'paper-colors' });
@@ -1471,21 +1685,59 @@ export class Editor {
   async insertImage() {
     const [file] = await pickFile('image/*');
     if (!file) return;
+    await this.insertImageBlob(file, 0.6);
+    toast('Drag to move, pull the corner to resize');
+  }
+
+  // Place an image (photo, sticker or saved element) in the middle of the visible page.
+  async insertImageBlob(blob, frac = 0.6, existingId = null) {
     const i = this.currentPageIndex();
     const pe = this.pageEls.get(this.pages[i].id);
-    const blobId = await putBlob(file);
+    const blobId = existingId || await putBlob(blob);
     const bmp = await loadImage(blobId);
     if (!bmp) { toast('Could not read that image'); return; }
-    const maxW = pe.page.w * 0.6, maxH = pe.page.h * 0.5;
+    const maxW = pe.page.w * frac, maxH = pe.page.h * frac * 0.8;
     const s = Math.min(1, maxW / bmp.width, maxH / bmp.height);
     const w = bmp.width * s, h = bmp.height * s;
-    const viewTop = Math.max(0, (this.scroller.scrollTop - pe.el.offsetTop) / this.scale);
-    const x = (pe.page.w - w) / 2, y = Math.min(pe.page.h - h - 10, viewTop + 60);
+    const view = this.horizontal ? 0 : Math.max(0, (this.scroller.scrollTop - pe.el.offsetTop) / this.scale);
+    const visH = this.scroller.clientHeight / this.scale;
+    const x = (pe.page.w - w) / 2, y = Math.max(10, Math.min(pe.page.h - h - 10, view + (Math.min(visH, pe.page.h) - h) / 2));
     const item = { id: uid(), type: 'image', blob: blobId, pts: [[x, y], [x + w, y + h]] };
     this.addItems(pe, [item]);
     this.selectTool('lasso');
     this.setSelection(pe, [item.id]);
-    toast('Drag to move, corner to resize');
+  }
+
+  stickerPicker(anchor) {
+    const box = el('div', { class: 'sticker-pop' });
+    const tab = this.stickerTab || 'stickers';
+    const render = async () => {
+      box.innerHTML = '';
+      box.append(el('div', { class: 'seg small' },
+        el('button', { class: this.stickerTab !== 'mine' ? 'on' : '', onclick: () => { this.stickerTab = 'stickers'; render(); } }, 'Stickers'),
+        el('button', { class: this.stickerTab === 'mine' ? 'on' : '', onclick: () => { this.stickerTab = 'mine'; render(); } }, 'My Elements')));
+      const grid = el('div', { class: 'sticker-grid' });
+      box.append(grid);
+      if (this.stickerTab === 'mine') {
+        const els = (await db.all('elements')).sort((a, b) => b.created - a.created);
+        if (!els.length) { box.append(el('p', { class: 'muted', style: { fontSize: '13px', margin: '8px 4px' } }, 'Lasso anything on a page and choose "Save Element" to reuse it here.')); return; }
+        for (const e of els) {
+          const b = await getBlob(e.blob);
+          if (!b) continue;
+          const url = URL.createObjectURL(b);
+          grid.append(el('button', { title: 'Insert (long-press menu to delete)', onclick: () => { closePopover(); this.insertImageBlob(null, 0.5, e.blob); },
+            oncontextmenu: async ev => { ev.preventDefault(); if (await confirm('Delete this element?', '', { ok: 'Delete', danger: true })) { await db.del('elements', e.id); render(); } } },
+          el('img', { src: url, alt: '' })));
+        }
+        return;
+      }
+      for (const c of STICKY) grid.append(el('button', { title: 'Sticky note', onclick: async () => { closePopover(); this.insertImageBlob(await stickyBlob(c), 0.32); } },
+        el('span', { style: { width: '70%', height: '70%', background: c, borderRadius: '3px', boxShadow: '0 2px 4px rgba(0,0,0,.18)', display: 'block' } })));
+      for (const em of EMOJI) grid.append(el('button', { onclick: async () => { closePopover(); this.insertImageBlob(await emojiBlob(em), 0.12); } }, em));
+    };
+    void tab;
+    render();
+    popover(anchor, box);
   }
 
   async insertPdf() {
@@ -1510,6 +1762,11 @@ export class Editor {
     this.recordPages(() => this.pages.splice(at, 0, ...objs));
     this.scrollToPage(at);
   }
+}
+
+function firstText(p) {
+  const t = p.items.find(i => i.type === 'text' && i.text && i.text.trim());
+  return t ? t.text.trim().split('\n')[0].slice(0, 40) : '';
 }
 
 function segDist(a, b, c, d) {

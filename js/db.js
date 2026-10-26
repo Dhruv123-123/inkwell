@@ -1,6 +1,6 @@
 // Small promise wrapper around IndexedDB. Everything lives on the device.
 const DB_NAME = 'inkwell';
-const DB_VERSION = 1;
+const DB_VERSION = 2;
 const STORES = {
   dividers: [],
   subjects: [],
@@ -8,6 +8,8 @@ const STORES = {
   pages: ['noteId'],
   blobs: [],
   recordings: ['noteId'],
+  elements: [],
+  study: [],
 };
 
 let dbp = null;

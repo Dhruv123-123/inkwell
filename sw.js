@@ -1,8 +1,8 @@
 // Offline support: precache the app shell, serve it cache-first.
-const VERSION = 'inkwell-v1';
+const VERSION = 'inkwell-v2';
 const ASSETS = [
   './', 'index.html', 'manifest.webmanifest', 'css/app.css',
-  'js/app.js', 'js/db.js', 'js/ui.js', 'js/render.js', 'js/store.js', 'js/editor.js', 'js/audio.js', 'js/shapes.js',
+  'js/app.js', 'js/db.js', 'js/ui.js', 'js/render.js', 'js/store.js', 'js/editor.js', 'js/audio.js', 'js/shapes.js', 'js/study.js',
   'vendor/pdf.min.mjs', 'vendor/pdf.worker.min.mjs',
   'icons/icon-192.png', 'icons/icon-512.png', 'icons/apple-touch-icon.png', 'icons/icon-maskable-512.png',
 ];

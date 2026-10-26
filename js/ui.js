@@ -1,11 +1,11 @@
 // Small UI kit: icons, toasts, dialogs, popovers and action menus.
-const P = d => `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">${d}</svg>`;
+const P = d => `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">${d}</svg>`;
 
 export const icon = {
   back: P('<path d="M15 18l-6-6 6-6"/>'),
   plus: P('<path d="M12 5v14M5 12h14"/>'),
-  pen: P('<path d="M4 20l1.2-4.6L16.6 4a2 2 0 0 1 2.8 0l.6.6a2 2 0 0 1 0 2.8L8.6 18.8z"/><path d="M14.5 6.2l3.3 3.3"/>'),
-  highlighter: P('<path d="M9 15l-3 3H3v-1.5L6.5 13"/><path d="M6.5 13l8.8-8.8a2 2 0 0 1 2.8 0l1.7 1.7a2 2 0 0 1 0 2.8L11 17.5z"/><path d="M14 21h7"/>'),
+  pen: P('<path d="M4 20l1.2-4.6L16.6 4a2 2 0 0 1 2.8 0l.6.6a2 2 0 0 1 0 2.8L8.6 18.8z"/><path d="M14.5 6.2l3.3 3.3"/><path d="M4 20l1.2-4.6 3.4 3.4z" fill="var(--tip, currentColor)" stroke="var(--tip, currentColor)"/>'),
+  highlighter: P('<path d="M9 15l-3 3H3v-1.5L6.5 13z" fill="var(--tip, none)" stroke="var(--tip, currentColor)"/><path d="M6.5 13l8.8-8.8a2 2 0 0 1 2.8 0l1.7 1.7a2 2 0 0 1 0 2.8L11 17.5z"/><path d="M14 21h7"/>'),
   eraser: P('<path d="M7 21h13"/><path d="M5.6 15.4l8.5-8.5a2 2 0 0 1 2.8 0l2.2 2.2a2 2 0 0 1 0 2.8L12 19H8.2a2 2 0 0 1-1.4-.6L5.6 17.2a1.3 1.3 0 0 1 0-1.8z"/><path d="M9.5 11.5l5 5"/>'),
   lasso: P('<path d="M7 17.5C4.5 16.3 3 14.4 3 12c0-4.4 4-7.5 9-7.5s9 3.1 9 7.5-4 7.5-9 7.5c-1 0-2-.1-2.9-.4"/><circle cx="7.5" cy="18.5" r="1.8"/><path d="M8.5 20c.5 1.2 0 2-1 2"/>'),
   text: P('<path d="M5 6V4h14v2"/><path d="M12 4v16"/><path d="M9 20h6"/>'),
@@ -39,6 +39,19 @@ export const icon = {
   pencil: P('<path d="M12 21l-2-6 8-12 3 2-8 12z"/><path d="M10 15l3 1"/>'),
   zoom: P('<circle cx="11" cy="11" r="7"/><path d="M20 20l-3.5-3.5M8 11h6M11 8v6"/>'),
   copy: P('<rect x="8" y="8" width="12" height="12" rx="2"/><path d="M16 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h2"/>'),
+  grid: P('<rect x="3.5" y="3.5" width="7" height="7" rx="1.5"/><rect x="13.5" y="3.5" width="7" height="7" rx="1.5"/><rect x="3.5" y="13.5" width="7" height="7" rx="1.5"/><rect x="13.5" y="13.5" width="7" height="7" rx="1.5"/>'),
+  list: P('<path d="M9 6h11M9 12h11M9 18h11"/><circle cx="4.5" cy="6" r="1" fill="currentColor"/><circle cx="4.5" cy="12" r="1" fill="currentColor"/><circle cx="4.5" cy="18" r="1" fill="currentColor"/>'),
+  tape: P('<path d="M4 9.5L18.5 5l1.5 5L5.5 14.5z" fill="var(--tip, none)" fill-opacity=".35"/><path d="M4 9.5L18.5 5l1.5 5L5.5 14.5zM7 18.5h11"/>'),
+  sticker: P('<path d="M20 12.5V5a1 1 0 0 0-1-1H5a1 1 0 0 0-1 1v14a1 1 0 0 0 1 1h7.5z"/><path d="M20 12.5h-5.5a2 2 0 0 0-2 2V20"/><circle cx="9" cy="9.5" r=".8" fill="currentColor"/><circle cx="14" cy="9.5" r=".8" fill="currentColor"/><path d="M8.5 13.5c1.5 1.3 3.5 1.3 5 0"/>'),
+  cards: P('<rect x="3" y="6" width="14" height="14" rx="2"/><path d="M7 6V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2h-2"/><path d="M7 13h6"/>'),
+  present: P('<rect x="3" y="4" width="18" height="12" rx="1.5"/><path d="M12 16v4M8 20h8"/><circle cx="12" cy="10" r="1.6" fill="currentColor"/>'),
+  settings: P('<circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.6 1.6 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.6 1.6 0 0 0-1.8-.3 1.6 1.6 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.6 1.6 0 0 0-1-1.5 1.6 1.6 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.6 1.6 0 0 0 .3-1.8 1.6 1.6 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.6 1.6 0 0 0 1.5-1 1.6 1.6 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.6 1.6 0 0 0 1.8.3H9a1.6 1.6 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.6 1.6 0 0 0 1 1.5 1.6 1.6 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.6 1.6 0 0 0-.3 1.8V9a1.6 1.6 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.6 1.6 0 0 0-1.5 1z"/>'),
+  transcript: P('<path d="M4 5h16v11H9l-5 4z"/><path d="M8 9h8M8 12.5h5"/>'),
+  outline: P('<path d="M8 6h12M8 12h12M8 18h12"/><path d="M4 6h.01M4 12h.01M4 18h.01" stroke-width="2.6"/>'),
+  moon: P('<path d="M20 14.5A8 8 0 0 1 9.5 4a8 8 0 1 0 10.5 10.5z"/>'),
+  check: P('<path d="M5 12.5l4.5 4.5L19 7.5"/>'),
+  flip: P('<path d="M4 12a8 8 0 0 1 14-5.3M20 12a8 8 0 0 1-14 5.3"/><path d="M18 3v4h-4M6 21v-4h4"/>'),
+  link: P('<path d="M10 14a4 4 0 0 0 5.7 0l3-3a4 4 0 0 0-5.7-5.7l-1 1"/><path d="M14 10a4 4 0 0 0-5.7 0l-3 3a4 4 0 0 0 5.7 5.7l1-1"/>'),
   ruler: P('<path d="M3 17L17 3l4 4L7 21z"/><path d="M7 13l2 2M10 10l2 2M13 7l2 2"/>'),
 };
 
